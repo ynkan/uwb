@@ -46,6 +46,30 @@
       },
       "revId": "e8bc1779eb64f6c4155b645489d127ea6185acab",
       "serverId": "85c56323-6fa9-3386-8a01-6480fb634889"
+    },
+    {
+      "unresolved": true,
+      "key": {
+        "uuid": "cd1100f3_131a8762",
+        "filename": "kernel/BUILD.bazel",
+        "patchSetId": 1
+      },
+      "lineNbr": 27,
+      "author": {
+        "id": 1121838
+      },
+      "writtenOn": "2021-11-10T23:28:37Z",
+      "side": 1,
+      "message": "Also, we need the visibility change below anyways, which can\u0027t be \"alias-ed\" without symlinks",
+      "parentUuid": "b841673a_d203a681",
+      "range": {
+        "startLine": 27,
+        "startChar": 22,
+        "endLine": 27,
+        "endChar": 24
+      },
+      "revId": "e8bc1779eb64f6c4155b645489d127ea6185acab",
+      "serverId": "85c56323-6fa9-3386-8a01-6480fb634889"
     }
   ]
 }
