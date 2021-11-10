@@ -94,6 +94,30 @@
       },
       "revId": "e8bc1779eb64f6c4155b645489d127ea6185acab",
       "serverId": "85c56323-6fa9-3386-8a01-6480fb634889"
+    },
+    {
+      "unresolved": true,
+      "key": {
+        "uuid": "1d7e60c5_ee9b23f6",
+        "filename": "kernel/BUILD.bazel",
+        "patchSetId": 1
+      },
+      "lineNbr": 27,
+      "author": {
+        "id": 1557540
+      },
+      "writtenOn": "2021-11-10T23:39:59Z",
+      "side": 1,
+      "message": "The code path shouldn\u0027t change often. We will eventually get rid of the nested repo \"device-modules\", but that won\u0027t happen for a few months I imagine.",
+      "parentUuid": "1de57a17_8750aabc",
+      "range": {
+        "startLine": 27,
+        "startChar": 22,
+        "endLine": 27,
+        "endChar": 24
+      },
+      "revId": "e8bc1779eb64f6c4155b645489d127ea6185acab",
+      "serverId": "85c56323-6fa9-3386-8a01-6480fb634889"
     }
   ]
 }
