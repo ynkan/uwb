@@ -1,0 +1,27 @@
+{
+  "comments": [
+    {
+      "unresolved": true,
+      "key": {
+        "uuid": "a7a0d390_1d0d09fb",
+        "filename": "kernel/BUILD.bazel",
+        "patchSetId": 1
+      },
+      "lineNbr": 27,
+      "author": {
+        "id": 1402878
+      },
+      "writtenOn": "2021-11-10T22:12:44Z",
+      "side": 1,
+      "message": "does it make sense to use a global alias for that? So that we do not have to change it at so many locations if we move code around?",
+      "range": {
+        "startLine": 27,
+        "startChar": 22,
+        "endLine": 27,
+        "endChar": 24
+      },
+      "revId": "e8bc1779eb64f6c4155b645489d127ea6185acab",
+      "serverId": "85c56323-6fa9-3386-8a01-6480fb634889"
+    }
+  ]
+}
