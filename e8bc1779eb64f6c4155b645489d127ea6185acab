@@ -70,6 +70,30 @@
       },
       "revId": "e8bc1779eb64f6c4155b645489d127ea6185acab",
       "serverId": "85c56323-6fa9-3386-8a01-6480fb634889"
+    },
+    {
+      "unresolved": true,
+      "key": {
+        "uuid": "1de57a17_8750aabc",
+        "filename": "kernel/BUILD.bazel",
+        "patchSetId": 1
+      },
+      "lineNbr": 27,
+      "author": {
+        "id": 1121838
+      },
+      "writtenOn": "2021-11-10T23:29:23Z",
+      "side": 1,
+      "message": "\u003e Also, we need the visibility change below anyways, which can\u0027t be \"alias-ed\" without symlinks\n\n... unless we do visibility:public, which I don\u0027t object",
+      "parentUuid": "cd1100f3_131a8762",
+      "range": {
+        "startLine": 27,
+        "startChar": 22,
+        "endLine": 27,
+        "endChar": 24
+      },
+      "revId": "e8bc1779eb64f6c4155b645489d127ea6185acab",
+      "serverId": "85c56323-6fa9-3386-8a01-6480fb634889"
     }
   ]
 }
