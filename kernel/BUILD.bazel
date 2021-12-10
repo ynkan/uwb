@@ -13,6 +13,7 @@ kernel_module(
     srcs = glob([
         "**/*.c",
         "**/*.h",
+        "Makefile",
         "Kbuild",
         "net/mcps802154/Kbuild",
         "drivers/net/ieee802154/Kbuild",
