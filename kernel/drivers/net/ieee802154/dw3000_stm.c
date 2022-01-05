@@ -41,7 +41,7 @@ static inline int dw3000_set_sched_attr(struct task_struct *p)
 #else
 	struct sched_attr attr = {
 		.sched_policy = SCHED_FIFO,
-		.sched_priority = MAX_USER_RT_PRIO - 1,
+		.sched_priority = MAX_RT_PRIO - 1,
 		.sched_flags = SCHED_FLAG_UTIL_CLAMP_MIN,
 		.sched_util_min = SCHED_CAPACITY_SCALE
 	};

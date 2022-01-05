@@ -1775,7 +1775,6 @@ static void dw3000_set_operational_state(struct dw3000 *dw,
  */
 int dw3000_poweron(struct dw3000 *dw)
 {
-	int timeout;
 	int rc;
 
 	if (dw->is_powered) {
@@ -1803,9 +1802,6 @@ stats:
 	dw3000_change_speed(dw, DW3000_SPI_SLOW_HZ);
 	/* Enable interrupt so we can catch the SPI ready IRQ */
 	enable_irq(dw->spi->irq);
-
-	/* Now, wait for SPI ready interrupt */
-	timeout = msecs_to_jiffies(500);
 
 	/* No IRQs after this point until device is enabled */
 	disable_irq(dw->spi->irq);
@@ -1967,8 +1963,6 @@ static int dw3000_wakeup(struct dw3000 *dw)
 	   SPI messages to be as fast as possible and modify it to include CS
 	   required delay in microseconds. */
 	struct spi_message *msg = dw->msg_read_sys_status;
-	struct spi_transfer *tr = list_first_entry(
-		&msg->transfers, struct spi_transfer, transfer_list);
 	int rc;
 
 	/* Avoid race condition with dw3000_poweroff while chip is stopped just
@@ -1979,9 +1973,6 @@ static int dw3000_wakeup(struct dw3000 *dw)
 
 	trace_dw3000_wakeup(dw);
 
-	/* Add a delay after transfer. See spi_transfer_delay_exec() called by
-	   spi_transfer_one_message(). */
-	tr->delay_usecs = DW3000_SPI_CS_WAKEUP_DELAY_US;
 	/* Now, execute SPI modified message/transfer */
 	rc = dw3000_spi_sync(dw, msg);
 	if (!rc) {
@@ -1990,8 +1981,6 @@ static int dw3000_wakeup(struct dw3000 *dw)
 		/* Re-enable spi's irqs. deepsleep disable them */
 		enable_irq(dw->spi->irq);
 	}
-	/* Reset delay in transfer */
-	tr->delay_usecs = 0;
 	return rc;
 	/* The next part of the wake process is located in
 	   dw3000_isr_handle_spi_ready(), executed when SPIRDY interrupt is
@@ -2126,7 +2115,7 @@ int dw3000_check_operational_state(struct dw3000 *dw, int delay_dtu,
 		rc = dw3000_wakeup(dw);
 		if (unlikely(rc))
 			return rc;
-		/* fallthrough */
+		fallthrough;
 	case DW3000_OP_STATE_WAKE_UP:
 		/* Inform caller to save parameters. Stored operation will redo
 		   deep sleep if needed. */
