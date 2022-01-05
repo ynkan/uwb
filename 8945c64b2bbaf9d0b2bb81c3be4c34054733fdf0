@@ -16,6 +16,23 @@
       "message": "Hi, These quick fixes are needed to make usb driver compile on branch common-android-mainline (5.16.0-rc8)",
       "revId": "8945c64b2bbaf9d0b2bb81c3be4c34054733fdf0",
       "serverId": "85c56323-6fa9-3386-8a01-6480fb634889"
+    },
+    {
+      "unresolved": false,
+      "key": {
+        "uuid": "a6bd4aab_458a8db6",
+        "filename": "/PATCHSET_LEVEL",
+        "patchSetId": 1
+      },
+      "lineNbr": 0,
+      "author": {
+        "id": 1012623
+      },
+      "writtenOn": "2022-01-05T15:50:38Z",
+      "side": 1,
+      "message": "Hi Pat, \nwould you mind reviewing it or maybe adding the right reviewer ?\n(It also compile with 5.10.43)\n\nThanks in advance.\n\nGuilhem",
+      "revId": "8945c64b2bbaf9d0b2bb81c3be4c34054733fdf0",
+      "serverId": "85c56323-6fa9-3386-8a01-6480fb634889"
     }
   ]
 }
