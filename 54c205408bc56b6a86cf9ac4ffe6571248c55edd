@@ -1,0 +1,21 @@
+{
+  "comments": [
+    {
+      "unresolved": false,
+      "key": {
+        "uuid": "6f68c6eb_8d079608",
+        "filename": "/PATCHSET_LEVEL",
+        "patchSetId": 1
+      },
+      "lineNbr": 0,
+      "author": {
+        "id": 1012623
+      },
+      "writtenOn": "2022-01-24T09:30:14Z",
+      "side": 1,
+      "message": "thx, I abandon my previous patch https://android-review.googlesource.com/c/kernel/google-modules/uwb/+/1937282",
+      "revId": "54c205408bc56b6a86cf9ac4ffe6571248c55edd",
+      "serverId": "85c56323-6fa9-3386-8a01-6480fb634889"
+    }
+  ]
+}
