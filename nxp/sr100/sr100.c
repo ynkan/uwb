@@ -49,6 +49,8 @@
 
 /* To control VDD gpios in Hikey for HVH board */
 #define HVH_VDD_ENABLE 0
+/* To control VDD Pmic for EOS */
+#define PMIC_VDD_ENABLE 1
 /* Cold reset Feature in case of Secure Element tx timeout */
 #define ESE_COLD_RESET 0
 
@@ -70,6 +72,10 @@ static bool is_fw_dwnld_enabled = false;
 
 /* Maximum UCI packet size supported from the driver */
 #define MAX_UCI_PKT_SIZE 4200
+
+#define USB_HSPHY_1P8_VOL_MIN			1704000 /* uV */
+#define USB_HSPHY_1P8_VOL_MAX			1800000 /* uV */
+#define USB_HSPHY_1P8_HPM_LOAD			19000	/* uA */
 
 /* Different driver debug lever */
 enum SR100_DEBUG_LEVEL { SR100_DEBUG_OFF, SR100_FULL_DEBUG , SR100_KERN_ALERT};
@@ -126,6 +132,8 @@ struct sr100_dev {
   unsigned int        vdd_1v8_gpio;
   unsigned int        vdd_1v8_rf_gpio;
   unsigned int        vbat_3v6_gpio;
+#elif PMIC_VDD_ENABLE
+  unsigned int        vdd_1v8_rf_gpio;
 #endif
 };
 #if (ENABLE_THROUGHPUT_MEASUREMENT == 1)
@@ -695,7 +703,6 @@ static ssize_t sr100_dev_read(struct file* filp, char* buf, size_t count,
   /*500ms timeout in jiffies*/
   sr100_dev->timeOutInMs = ((500*HZ)/1000);
   memset(sr100_dev->rx_buffer, 0x00, SR100_RXBUF_SIZE);
-  SR100_DBG_MSG(" Check irq_gpio\n");
   if (!gpio_get_value(sr100_dev->irq_gpio)) {
     if (filp->f_flags & O_NONBLOCK) {
       ret = -EAGAIN;
@@ -800,16 +807,16 @@ static int sr100_hw_setup(struct sr100_spi_platform_data* platform_data) {
     goto fail_gpio;
   }
 #if HVH_VDD_ENABLE
-  // ret = gpio_request(platform_data->vdd_1v8_gpio, "sup_vdd_1v8");
-  // if (ret) {
-  //     pr_info("%s:  sr100 vdd_1v8_gpio failed\n", __func__);
-  //     goto fail_gpio;
-  // }
-  // ret = gpio_direction_output(platform_data->vdd_1v8_gpio, 0);
-  // if (ret < 0) {
-  //     pr_err("%s : not able to set vdd_1v8_gpio as output\n", __func__);
-  //     goto fail_gpio;
-  // }
+  ret = gpio_request(platform_data->vdd_1v8_gpio, "sup_vdd_1v8");
+  if (ret) {
+      pr_info("%s:  sr100 vdd_1v8_gpio failed\n", __func__);
+      goto fail_gpio;
+  }
+  ret = gpio_direction_output(platform_data->vdd_1v8_gpio, 0);
+  if (ret < 0) {
+      pr_err("%s : not able to set vdd_1v8_gpio as output\n", __func__);
+      goto fail_gpio;
+  }
   ret = gpio_request(platform_data->vdd_1v8_rf_gpio, "sup_vdd_rf");
   if (ret) {
       pr_info("%s:  sr100 vdd_1v8_rf_gpio failed\n", __func__);
@@ -820,18 +827,30 @@ static int sr100_hw_setup(struct sr100_spi_platform_data* platform_data) {
       pr_err("%s : not able to set vdd_1v8_rf_gpio as output\n", __func__);
       goto fail_gpio;
   }
-  // ret = gpio_request(platform_data->vbat_3v6_gpio, "sup_vbat_3v6");
-  // if (ret) {
-  //     pr_info("%s:  sr100 sup_vbat_3v6 failed\n", __func__);
-  //     goto fail_gpio;
-  // }
-  // ret = gpio_direction_output(platform_data->vbat_3v6_gpio, 0);
-  // if (ret < 0) {
-  //     pr_err("%s : not able to set vbat_3v6_gpio as output\n", __func__);
-  //     goto fail_gpio;
-  // }
+  ret = gpio_request(platform_data->vbat_3v6_gpio, "sup_vbat_3v6");
+  if (ret) {
+      pr_info("%s:  sr100 sup_vbat_3v6 failed\n", __func__);
+      goto fail_gpio;
+  }
+  ret = gpio_direction_output(platform_data->vbat_3v6_gpio, 0);
+  if (ret < 0) {
+      pr_err("%s : not able to set vbat_3v6_gpio as output\n", __func__);
+      goto fail_gpio;
+  }
 
   pr_info(" HVH Power enable: %s \n", __func__);
+#elif PMIC_VDD_ENABLE
+  ret = regulator_set_load(platform_data->vdd_1v8_rf_gpio, USB_HSPHY_1P8_HPM_LOAD);
+  if (ret < 0) {
+    pr_info("Unable to set HPM of vdd_1v8_rf_gpio:%d\n", ret);
+    goto fail_gpio;
+  }
+  ret = regulator_set_voltage(platform_data->vdd_1v8_rf_gpio, USB_HSPHY_1P8_VOL_MIN, USB_HSPHY_1P8_VOL_MAX);
+  if (ret) {
+    pr_info("Unable to set voltage for vdd_1v8_rf_gpio:%d\n", ret);
+    goto fail_gpio;
+  }
+  pr_info(" PMIC Power configure : %s \n", __func__);
 #endif
   ret = 0;
   SR100_DBG_MSG("Exit : %s\n", __FUNCTION__);
@@ -840,9 +859,11 @@ static int sr100_hw_setup(struct sr100_spi_platform_data* platform_data) {
 fail_gpio:
   gpio_free(platform_data->spi_handshake_gpio);
 #if HVH_VDD_ENABLE
-  // gpio_free(platform_data->vdd_1v8_gpio);
+  gpio_free(platform_data->vdd_1v8_gpio);
   gpio_free(platform_data->vdd_1v8_rf_gpio);
-  // gpio_free(platform_data->vbat_3v6_gpio);
+  gpio_free(platform_data->vbat_3v6_gpio);
+#elif PMIC_VDD_ENABLE
+  gpio_free(platform_data->vdd_1v8_rf_gpio);
 #endif
 fail_irq:
   gpio_free(platform_data->irq_gpio);
@@ -915,21 +936,23 @@ static int sr100_parse_dt(struct device* dev,
     return -EINVAL;
   }
 #if HVH_VDD_ENABLE
-  // pdata->vdd_1v8_gpio = of_get_named_gpio(np, "nxp,sr100-vdd", 0);
-  // if ((!gpio_is_valid(pdata->vdd_1v8_gpio)))
-  //         return -EINVAL;
-
+  pdata->vdd_1v8_gpio = of_get_named_gpio(np, "nxp,sr100-vdd", 0);
+  if ((!gpio_is_valid(pdata->vdd_1v8_gpio)))
+          return -EINVAL;
   pdata->vdd_1v8_rf_gpio = of_get_named_gpio(np, "nxp,sr100-dig", 0);
   if ((!gpio_is_valid(pdata->vdd_1v8_rf_gpio)))
           return -EINVAL;
-
-  // pdata->vbat_3v6_gpio = of_get_named_gpio(np, "nxp,sr100-vbat", 0);
-  // if ((!gpio_is_valid(pdata->vbat_3v6_gpio)))
-  //         return -EINVAL;
-  // pr_info("sr100 : vdd_1v8_gpio = %d, vdd_1v8_rf_gpio = %d, vbat_3v6_gpio = %d \n",
-  // pdata->vdd_1v8_gpio, pdata->vdd_1v8_rf_gpio,pdata->vbat_3v6_gpio);
-  pr_info("sr100 : vdd_1v8_rf_gpio = %d\n",
-   pdata->vdd_1v8_rf_gpio);
+  pdata->vbat_3v6_gpio = of_get_named_gpio(np, "nxp,sr100-vbat", 0);
+  if ((!gpio_is_valid(pdata->vbat_3v6_gpio)))
+          return -EINVAL;
+  pr_info("sr100 : vdd_1v8_gpio = %d, vdd_1v8_rf_gpio = %d, vbat_3v6_gpio = %d \n",
+  pdata->vdd_1v8_gpio, pdata->vdd_1v8_rf_gpio,pdata->vbat_3v6_gpio);
+#elif PMIC_VDD_ENABLE
+  pdata->vdd_1v8_rf_gpio = devm_regulator_get(dev, "nxp,sr100-dig");
+  if (IS_ERR(pdata->vdd_1v8_rf_gpio)) {
+    SR100_DBG_MSG("unable to get sr100-dig supply\n");
+    return -EINVAL;
+  }
 #endif
   pr_info("sr100 : irq_gpio = %d, ce_gpio = %d, spi_handshake_gpio = %d \n",
           pdata->irq_gpio, pdata->ce_gpio,pdata->spi_handshake_gpio);
@@ -993,9 +1016,11 @@ static int sr100_probe(struct spi_device* spi) {
   sr100_dev->spi_handshake_gpio = platform_data->spi_handshake_gpio;
 
 #if HVH_VDD_ENABLE
-  // sr100_dev->vdd_1v8_gpio = platform_data->vdd_1v8_gpio;
+  sr100_dev->vdd_1v8_gpio = platform_data->vdd_1v8_gpio;
   sr100_dev->vdd_1v8_rf_gpio = platform_data->vdd_1v8_rf_gpio;
-  // sr100_dev->vbat_3v6_gpio = platform_data->vbat_3v6_gpio;
+  sr100_dev->vbat_3v6_gpio = platform_data->vbat_3v6_gpio;
+#elif PMIC_VDD_ENABLE
+  sr100_dev->vdd_1v8_rf_gpio = platform_data->vdd_1v8_rf_gpio;
 #endif
   sr100_dev->tx_buffer = kzalloc(SR100_TXBUF_SIZE, GFP_KERNEL);
   sr100_dev->rx_buffer = kzalloc(SR100_RXBUF_SIZE, GFP_KERNEL);
@@ -1044,16 +1069,17 @@ static int sr100_probe(struct spi_device* spi) {
     goto err_exit1;
   }
   sr100_disable_irq(sr100_dev);
+  gpio_set_value(sr100_dev->ce_gpio, 0);
 #if HVH_VDD_ENABLE
-  // gpio_set_value(sr100_dev->vdd_1v8_gpio, 1);
+  gpio_set_value(sr100_dev->vdd_1v8_gpio, 1);
   gpio_set_value(sr100_dev->vdd_1v8_rf_gpio, 1);
-  // gpio_set_value(sr100_dev->vbat_3v6_gpio, 1);
+  gpio_set_value(sr100_dev->vbat_3v6_gpio, 1);
   pr_info(" VDD Req for HVH: %s\n", __func__);
+#elif PMIC_VDD_ENABLE
+  if (regulator_enable(sr100_dev->vdd_1v8_rf_gpio))
+    SR100_DBG_MSG("Unable to enable vdd_1v8_rf_gpio:%d\n", ret);
 #endif
-  // gpio_set_value(sr100_dev->ce_gpio, 1);
-  // gpio_set_value(sr100_dev->ce_gpio, 0);
-  // gpio_set_value(sr100_dev->ce_gpio, 1);
-  // SR100_DBG_MSG("Get gpio value (chip enable) : %d\n", gpio_get_value(sr100_dev->ce_gpio));
+  gpio_set_value(sr100_dev->ce_gpio, 1);
 
   SR100_DBG_MSG("Exit : %s\n", __FUNCTION__);
   return ret;
@@ -1097,9 +1123,11 @@ static int sr100_remove(struct spi_device* spi) {
   gpio_free(sr100_dev->irq_gpio);
   gpio_free(sr100_dev->spi_handshake_gpio);
 #if HVH_VDD_ENABLE
-  // gpio_free(sr100_dev->vdd_1v8_gpio);
+  gpio_free(sr100_dev->vdd_1v8_gpio);
   gpio_free(sr100_dev->vdd_1v8_rf_gpio);
-  // gpio_free(sr100_dev->vbat_3v6_gpio);
+  gpio_free(sr100_dev->vbat_3v6_gpio);
+#elif PMIC_VDD_ENABLE
+  gpio_free(sr100_dev->vdd_1v8_rf_gpio);
 #endif
   misc_deregister(&sr100_dev->sr100_device);
   if (sr100_dev != NULL) {
