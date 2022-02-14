@@ -415,9 +415,6 @@ static int sr100_dev_transceive(struct sr100_dev* sr100_dev, int op_mode, int co
       sr100_dev->write_count = 0;
       /* UCI Header write */
       ret = spi_write(sr100_dev->spi, sr100_dev->tx_buffer, NORMAL_MODE_HEADER_LEN);
-      for (int i = 0; i < NORMAL_MODE_HEADER_LEN; i++)
-        printk(KERN_ALERT "0x%02x ", sr100_dev->tx_buffer[i]);
-      printk(KERN_ALERT "\n");
       if (ret < 0) {
         ret = -EIO;
         printk("spi_write header : Failed.\n");
@@ -429,9 +426,6 @@ static int sr100_dev_transceive(struct sr100_dev* sr100_dev, int op_mode, int co
         usleep_range(30, 50);
         /* UCI Payload write */
         ret = spi_write(sr100_dev->spi, sr100_dev->tx_buffer + NORMAL_MODE_HEADER_LEN, count);
-        for (int i = 0; i < count; i++)
-          printk(KERN_ALERT "0x%02x ", sr100_dev->tx_buffer[i]);
-        printk(KERN_ALERT "\n");
         if (ret < 0) {
           ret = -EIO;
           printk("spi_write payload : Failed.\n");
@@ -1165,7 +1159,7 @@ static struct spi_driver sr100_driver = {
  ****************************************************************************/
 static int __init sr100_dev_init(void) {
   SR100_DBG_MSG("Entry : %s\n", __FUNCTION__);
-  debug_level = SR100_KERN_ALERT;
+  debug_level = SR100_FULL_DEBUG;
   return spi_register_driver(&sr100_driver);
 }
 module_init(sr100_dev_init);
