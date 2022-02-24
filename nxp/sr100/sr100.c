@@ -44,6 +44,11 @@
 #include <linux/poll.h>
 #include <linux/regulator/consumer.h>
 #include <linux/mutex.h>
+#include <linux/time.h>
+#include <linux/ktime.h>
+#include <linux/timekeeping.h>
+#include <linux/linkage.h>
+
 #include "sr100.h"
 
 /* To control VDD gpios in Hikey for HVH board */
@@ -67,7 +72,7 @@ static bool is_fw_dwnld_enabled = false;
 /* Macro to define SPI clock frequency */
 
 #define SR100_SPI_CLOCK 16000000L;
-#define ENABLE_THROUGHPUT_MEASUREMENT 0
+#define ENABLE_THROUGHPUT_MEASUREMENT 1
 
 /* Maximum UCI packet size supported from the driver */
 #define MAX_UCI_PKT_SIZE 4200
@@ -139,10 +144,10 @@ struct sr100_dev {
 #define READ_THROUGH_PUT 0x01
 #define WRITE_THROUGH_PUT 0x02
 struct sr100_through_put {
-	struct timeval rstart_tv;
-	struct timeval wstart_tv;
-	struct timeval rstop_tv;
-	struct timeval wstop_tv;
+	struct timespec64 rstart_tv;
+	struct timespec64 wstart_tv;
+	struct timespec64 rstop_tv;
+	struct timespec64 wstop_tv;
 	unsigned long total_through_put_wbytes;
 	unsigned long total_through_put_rbytes;
 	unsigned long total_through_put_rtime;
@@ -190,13 +195,13 @@ static void sr100_stop_throughput_measurement(unsigned int type, int no_of_bytes
 		memset(&sr100_through_put_t.rstop_tv, 0x00, sizeof(struct timespec64));
 		ktime_get_real_ts64(&sr100_through_put_t.rstop_tv);
 		sr100_through_put_t.total_through_put_rbytes += no_of_bytes;
-		sr100_through_put_t.total_through_put_rtime += (sr100_through_put_t.rstop_tv.tv_usec - sr100_through_put_t.rstart_tv.tv_usec) + ((sr100_through_put_t.rstop_tv.tv_sec - sr100_through_put_t.rstart_tv.tv_sec) * 1000000);
+		sr100_through_put_t.total_through_put_rtime += (sr100_through_put_t.rstop_tv.tv_nsec - sr100_through_put_t.rstart_tv.tv_nsec) + ((sr100_through_put_t.rstop_tv.tv_sec - sr100_through_put_t.rstart_tv.tv_sec) * 1000000000);
 	}
 	else if (type == WRITE_THROUGH_PUT) {
 		memset(&sr100_through_put_t.wstop_tv, 0x00, sizeof(struct timespec64));
 		ktime_get_real_ts64(&sr100_through_put_t.wstop_tv);
 		sr100_through_put_t.total_through_put_wbytes += no_of_bytes;
-		sr100_through_put_t.total_through_put_wtime += (sr100_through_put_t.wstop_tv.tv_usec - sr100_through_put_t.wstart_tv.tv_usec) + ((sr100_through_put_t.wstop_tv.tv_sec - sr100_through_put_t.wstart_tv.tv_sec) * 1000000);
+		sr100_through_put_t.total_through_put_wtime += (sr100_through_put_t.wstop_tv.tv_nsec - sr100_through_put_t.wstart_tv.tv_nsec) + ((sr100_through_put_t.wstop_tv.tv_sec - sr100_through_put_t.wstart_tv.tv_sec) * 1000000000);
 	}
 	else {
 		printk(KERN_ALERT " sr100_stop_throughput_measurement: wrong type = %d", type);
@@ -346,13 +351,14 @@ static long sr100_dev_ioctl(struct file* filp, unsigned int cmd, unsigned long a
 		case SR100_GET_THROUGHPUT:
 			if (arg == 0) {
 #if (ENABLE_THROUGHPUT_MEASUREMENT == 1)
-				printk(KERN_ALERT
-				       " **************** Write-Read Throughput: **************");
+				printk(KERN_ALERT  " **************** Write-Read Throughput: **************");
 				printk(KERN_ALERT " No of Write Bytes = %ld", sr100_through_put_t.total_through_put_wbytes);
 				printk(KERN_ALERT " No of Read Bytes = %ld", sr100_through_put_t.total_through_put_rbytes);
-				printk(KERN_ALERT " Total Write Time (uSec) = %ld", sr100_through_put_t.total_through_put_wtime);
-				printk(KERN_ALERT " Total Read Time (uSec) = %ld", sr100_through_put_t.total_through_put_rtime);
-				printk(KERN_ALERT " Total Write-Read Time (uSec) = %ld", sr100_through_put_t.total_through_put_wtime + sr100_through_put_t.total_through_put_rtime);
+				printk(KERN_ALERT " Total Write Time (sec) = %ld.%09ld", sr100_through_put_t.total_through_put_wtime / 1000000000, sr100_through_put_t.total_through_put_wtime % 1000000000);
+				printk(KERN_ALERT " Total Read  Time (sec) = %ld.%09ld", sr100_through_put_t.total_through_put_rtime / 1000000000, sr100_through_put_t.total_through_put_rtime % 1000000000);
+				printk(KERN_ALERT " Total Write-Read Time (sec) = %ld.%09ld", 
+                                                                  (sr100_through_put_t.total_through_put_wtime + sr100_through_put_t.total_through_put_rtime) / 1000000000,
+                                                                  (sr100_through_put_t.total_through_put_wtime + sr100_through_put_t.total_through_put_rtime) % 1000000000);
 				sr100_through_put_t.total_through_put_wbytes = 0;
 				sr100_through_put_t.total_through_put_rbytes = 0;
 				sr100_through_put_t.total_through_put_wtime = 0;
