@@ -1,5 +1,9 @@
-#
-# Makefile for the kernel nfc device drivers.
-#
+all:
+	$(MAKE) -C $(KERNEL_SRC) M=$(M) modules $(KBUILD_OPTIONS) KCFLAGS='$(KBUILD_FLAGS)'
 
-obj-$(CONFIG_NXP_SR100)	        += sr100.o
+modules_install:
+	$(MAKE) INSTALL_MOD_STRIP=1 M=$(M) -C $(KERNEL_SRC) modules_install
+
+clean::
+	rm -f *.o *.ko *.mod.c *.mod.o *~ .*.cmd Module.symvers
+	rm -rf .tmp_versions
