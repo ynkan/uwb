@@ -40,6 +40,7 @@ struct sr100_spi_platform_data {
 	unsigned int ce_gpio;
 	unsigned int spi_handshake_gpio;
 	unsigned int rtc_sync_gpio;
+	struct regulator *regulator_1v8;
 	unsigned int vdd_1v8_gpio; /* to control VDD for super interposer board */
 	unsigned int vdd_1v8_rf_gpio;
 	unsigned int vbat_3v6_gpio;

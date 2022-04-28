@@ -137,7 +137,7 @@ struct sr100_dev {
 	unsigned int        vdd_1v8_rf_gpio;
 	unsigned int        vbat_3v6_gpio;
 #elif PMIC_VDD_ENABLE
-	unsigned int        vdd_1v8_rf_gpio;
+	struct regulator	*regulator_1v8;
 #endif
 };
 #if (ENABLE_THROUGHPUT_MEASUREMENT == 1)
@@ -838,14 +838,14 @@ static int sr100_hw_setup(struct sr100_spi_platform_data* platform_data)
 
 	pr_info(" HVH Power enable: %s \n", __func__);
 #elif PMIC_VDD_ENABLE
-	ret = regulator_set_load(platform_data->vdd_1v8_rf_gpio, USB_HSPHY_1P8_HPM_LOAD);
+	ret = regulator_set_load(platform_data->regulator_1v8, USB_HSPHY_1P8_HPM_LOAD);
 	if (ret < 0) {
-		pr_info("Unable to set HPM of vdd_1v8_rf_gpio:%d\n", ret);
+		pr_info("Unable to set HPM of regulator_1v8:%d\n", ret);
 		goto fail_gpio;
 	}
-	ret = regulator_set_voltage(platform_data->vdd_1v8_rf_gpio, USB_HSPHY_1P8_VOL_MIN, USB_HSPHY_1P8_VOL_MAX);
+	ret = regulator_set_voltage(platform_data->regulator_1v8, USB_HSPHY_1P8_VOL_MIN, USB_HSPHY_1P8_VOL_MAX);
 	if (ret) {
-		pr_info("Unable to set voltage for vdd_1v8_rf_gpio:%d\n", ret);
+		pr_info("Unable to set voltage for regulator_1v8:%d\n", ret);
 		goto fail_gpio;
 	}
 	pr_info(" PMIC Power configure : %s \n", __func__);
@@ -860,8 +860,6 @@ fail_gpio:
 	gpio_free(platform_data->vdd_1v8_gpio);
 	gpio_free(platform_data->vdd_1v8_rf_gpio);
 	gpio_free(platform_data->vbat_3v6_gpio);
-#elif PMIC_VDD_ENABLE
-	gpio_free(platform_data->vdd_1v8_rf_gpio);
 #endif
 fail_irq:
 	gpio_free(platform_data->irq_gpio);
@@ -948,8 +946,8 @@ static int sr100_parse_dt(struct device* dev, struct sr100_spi_platform_data* pd
 	pr_info("sr100 : vdd_1v8_gpio = %d, vdd_1v8_rf_gpio = %d, vbat_3v6_gpio = %d \n",
 	        pdata->vdd_1v8_gpio, pdata->vdd_1v8_rf_gpio, pdata->vbat_3v6_gpio);
 #elif PMIC_VDD_ENABLE
-	pdata->vdd_1v8_rf_gpio = devm_regulator_get(dev, "nxp,sr100-dig");
-	if (IS_ERR(pdata->vdd_1v8_rf_gpio)) {
+	pdata->regulator_1v8 = devm_regulator_get(dev, "nxp,sr100-dig");
+	if (IS_ERR(pdata->regulator_1v8)) {
 		SR100_DBG_MSG("unable to get sr100-dig supply\n");
 		return -EINVAL;
 	}
@@ -1021,7 +1019,7 @@ static int sr100_probe(struct spi_device* spi)
 	sr100_dev->vdd_1v8_rf_gpio = platform_data->vdd_1v8_rf_gpio;
 	sr100_dev->vbat_3v6_gpio = platform_data->vbat_3v6_gpio;
 #elif PMIC_VDD_ENABLE
-	sr100_dev->vdd_1v8_rf_gpio = platform_data->vdd_1v8_rf_gpio;
+	sr100_dev->regulator_1v8 = platform_data->regulator_1v8;
 #endif
 	sr100_dev->tx_buffer = kzalloc(SR100_TXBUF_SIZE, GFP_KERNEL);
 	sr100_dev->rx_buffer = kzalloc(SR100_RXBUF_SIZE, GFP_KERNEL);
@@ -1077,7 +1075,7 @@ static int sr100_probe(struct spi_device* spi)
 	gpio_set_value(sr100_dev->vbat_3v6_gpio, 1);
 	pr_info(" VDD Req for HVH: %s\n", __func__);
 #elif PMIC_VDD_ENABLE
-	if (regulator_enable(sr100_dev->vdd_1v8_rf_gpio))
+	if (regulator_enable(sr100_dev->regulator_1v8))
 		SR100_DBG_MSG("Unable to enable vdd_1v8_rf_gpio:%d\n", ret);
 #endif
 	gpio_set_value(sr100_dev->ce_gpio, 1);
@@ -1128,8 +1126,6 @@ static int sr100_remove(struct spi_device* spi)
 	gpio_free(sr100_dev->vdd_1v8_gpio);
 	gpio_free(sr100_dev->vdd_1v8_rf_gpio);
 	gpio_free(sr100_dev->vbat_3v6_gpio);
-#elif PMIC_VDD_ENABLE
-	gpio_free(sr100_dev->vdd_1v8_rf_gpio);
 #endif
 	misc_deregister(&sr100_dev->sr100_device);
 	if (sr100_dev != NULL) {
