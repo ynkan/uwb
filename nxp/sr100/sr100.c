@@ -222,8 +222,8 @@ static void sr100_stop_throughput_measurement(unsigned int type, int no_of_bytes
  ****************************************************************************/
 static int sr100_dev_open(struct inode* inode, struct file* filp)
 {
-	SR100_DBG_MSG("Entry : %s\n", __FUNCTION__);
 	struct sr100_dev* sr100_dev = container_of(filp->private_data, struct sr100_dev, sr100_device);
+	SR100_DBG_MSG("Entry : %s\n", __FUNCTION__);
 
 	filp->private_data = sr100_dev;
 	SR100_DBG_MSG("%s : Major No: %d, Minor No: %d\n", __func__, imajor(inode), iminor(inode));
@@ -242,8 +242,8 @@ static int sr100_dev_open(struct inode* inode, struct file* filp)
  ****************************************************************************/
 static void sr100_disable_irq(struct sr100_dev* sr100_dev)
 {
-	SR100_DBG_MSG("Entry : %s\n", __FUNCTION__);
 	unsigned long flags;
+	SR100_DBG_MSG("Entry : %s\n", __FUNCTION__);
 	spin_lock_irqsave(&sr100_dev->irq_enabled_lock, flags);
 	if((sr100_dev->irq_enabled)) {
 		disable_irq_nosync(sr100_dev->spi->irq);
@@ -264,8 +264,8 @@ static void sr100_disable_irq(struct sr100_dev* sr100_dev)
  ****************************************************************************/
 static void sr100_enable_irq(struct sr100_dev* sr100_dev)
 {
-	SR100_DBG_MSG("Entry : %s\n", __FUNCTION__);
 	unsigned long flags;
+	SR100_DBG_MSG("Entry : %s\n", __FUNCTION__);
 	spin_lock_irqsave(&sr100_dev->irq_enabled_lock, flags);
 	if(!sr100_dev->irq_enabled) {
 		enable_irq(sr100_dev->spi->irq);
@@ -288,8 +288,8 @@ static void sr100_enable_irq(struct sr100_dev* sr100_dev)
  ****************************************************************************/
 static irqreturn_t sr100_dev_irq_handler(int irq, void* dev_id)
 {
-	SR100_DBG_MSG("Entry : %s\n", __FUNCTION__);
 	struct sr100_dev* sr100_dev = dev_id;
+	SR100_DBG_MSG("Entry : %s\n", __FUNCTION__);
 	sr100_disable_irq(sr100_dev);
 	/* Wake up waiting readers */
 	wake_up(&sr100_dev->read_wq);
@@ -311,9 +311,9 @@ static irqreturn_t sr100_dev_irq_handler(int irq, void* dev_id)
  ****************************************************************************/
 static long sr100_dev_ioctl(struct file* filp, unsigned int cmd, unsigned long arg)
 {
-	SR100_DBG_MSG("Entry : %s\n", __FUNCTION__);
 	int ret = 0;
 	struct sr100_dev* sr100_dev = NULL;
+	SR100_DBG_MSG("Entry : %s\n", __FUNCTION__);
 	sr100_dev = filp->private_data;
 	switch (cmd) {
 		case SR100_SET_PWR:
@@ -395,8 +395,8 @@ static long sr100_dev_ioctl(struct file* filp, unsigned int cmd, unsigned long a
 
 static int sr100_dev_transceive(struct sr100_dev* sr100_dev, int op_mode, int count)
 {
-	SR100_DBG_MSG("Entry : %s\n", __FUNCTION__);
 	int ret, retry_count;
+	SR100_DBG_MSG("Entry : %s\n", __FUNCTION__);
 	mutex_lock(&sr100_dev->sr100_access_lock);
 	sr100_dev->mode = op_mode;
 	sr100_dev->totalBtyesToRead = 0;
@@ -539,8 +539,8 @@ transcive_end:
 
 static int sr100_hbci_write(struct sr100_dev* sr100_dev, int count)
 {
-	SR100_DBG_MSG("Entry : %s\n", __FUNCTION__);
 	int ret;
+	SR100_DBG_MSG("Entry : %s\n", __FUNCTION__);
 	sr100_dev->write_count = 0;
 	/* HBCI write */
 	ret = spi_write(sr100_dev->spi, sr100_dev->tx_buffer, count);
@@ -574,9 +574,9 @@ hbci_write_fail:
  ****************************************************************************/
 static ssize_t sr100_dev_write(struct file* filp, const char* buf, size_t count, loff_t* offset)
 {
-	SR100_DBG_MSG("Entry : %s\n", __FUNCTION__);
 	int ret;
 	struct sr100_dev* sr100_dev;
+	SR100_DBG_MSG("Entry : %s\n", __FUNCTION__);
 	sr100_dev = filp->private_data;
 	if (count > SR100_MAX_TX_BUF_SIZE || count > SR100_TXBUF_SIZE) {
 		SR100_ERR_MSG("%s : Write Size Exceeds\n", __func__);
@@ -625,8 +625,8 @@ write_end:
  ****************************************************************************/
 static ssize_t sr100_hbci_read(struct sr100_dev *sr100_dev, char* buf, size_t count)
 {
-	SR100_DBG_MSG("Entry : %s\n", __FUNCTION__);
 	int ret = -EIO;
+	SR100_DBG_MSG("Entry : %s\n", __FUNCTION__);
 	if(count > SR100_RXBUF_SIZE) {
 		SR100_ERR_MSG("count(%d) out of range(0-%d)\n", count, SR100_RXBUF_SIZE);
 		ret = -EINVAL;
@@ -690,10 +690,10 @@ hbci_fail:
  ****************************************************************************/
 static ssize_t sr100_dev_read(struct file* filp, char* buf, size_t count, loff_t* offset)
 {
-	SR100_DBG_MSG("Entry : %s\n", __FUNCTION__);
 	struct sr100_dev* sr100_dev = filp->private_data;
 	int ret = -EIO;
 	int retry_count = 0;
+	SR100_DBG_MSG("Entry : %s\n", __FUNCTION__);
 	/*500ms timeout in jiffies*/
 	sr100_dev->timeOutInMs = ((500 * HZ) / 1000);
 	memset(sr100_dev->rx_buffer, 0x00, SR100_RXBUF_SIZE);
@@ -920,8 +920,8 @@ static const struct file_operations sr100_dev_fops = {
  ****************************************************************************/
 static int sr100_parse_dt(struct device* dev, struct sr100_spi_platform_data* pdata)
 {
-	SR100_DBG_MSG("Entry : %s\n", __FUNCTION__);
 	struct device_node* np = dev->of_node;
+	SR100_DBG_MSG("Entry : %s\n", __FUNCTION__);
 
 	pdata->irq_gpio = of_get_named_gpio(np, "nxp,sr100-irq", 0);
 	if (!gpio_is_valid(pdata->irq_gpio)) {
@@ -970,12 +970,12 @@ static int sr100_parse_dt(struct device* dev, struct sr100_spi_platform_data* pd
  ****************************************************************************/
 static int sr100_probe(struct spi_device* spi)
 {
-	SR100_DBG_MSG("Entry : %s\n", __FUNCTION__);
 	int ret;
 	struct sr100_spi_platform_data* platform_data = NULL;
 	struct sr100_spi_platform_data platform_data1;
 	struct sr100_dev* sr100_dev = NULL;
 	unsigned int irq_flags;
+	SR100_DBG_MSG("Entry : %s\n", __FUNCTION__);
 
 	SR100_DBG_MSG("chip select : %d , bus number = %d \n", spi->chip_select, spi->master->bus_num);
 
@@ -1117,8 +1117,8 @@ err_exit:
  ****************************************************************************/
 static int sr100_remove(struct spi_device* spi)
 {
-	SR100_DBG_MSG("Entry : %s\n", __FUNCTION__);
 	struct sr100_dev* sr100_dev = sr100_get_data(spi);
+	SR100_DBG_MSG("Entry : %s\n", __FUNCTION__);
 	gpio_free(sr100_dev->ce_gpio);
 	mutex_destroy(&sr100_dev->sr100_access_lock);
 	free_irq(sr100_dev->spi->irq, sr100_dev);
