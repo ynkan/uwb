@@ -22,6 +22,30 @@
       },
       "revId": "daf04ea65189a77b0b366664b38e4f55ef9d43ef",
       "serverId": "85c56323-6fa9-3386-8a01-6480fb634889"
+    },
+    {
+      "unresolved": false,
+      "key": {
+        "uuid": "86fb5fd2_540baaa8",
+        "filename": "kernel/drivers/net/ieee802154/dw3000_core.c",
+        "patchSetId": 1
+      },
+      "lineNbr": 916,
+      "author": {
+        "id": 1557540
+      },
+      "writtenOn": "2022-05-03T20:04:17Z",
+      "side": 0,
+      "message": "I don\u0027t want to modify the usage of the struct in order to avoid issues with merge conflicts between the different branches. I agree though that we weren\u0027t technically writing OOB. The fix is better in general though since the memset isn\u0027t necessary when you can init local variables during declaration.",
+      "parentUuid": "61d55be6_fadacb85",
+      "range": {
+        "startLine": 916,
+        "startChar": 47,
+        "endLine": 916,
+        "endChar": 48
+      },
+      "revId": "daf04ea65189a77b0b366664b38e4f55ef9d43ef",
+      "serverId": "85c56323-6fa9-3386-8a01-6480fb634889"
     }
   ]
 }
