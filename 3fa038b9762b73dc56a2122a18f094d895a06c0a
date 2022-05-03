@@ -1,0 +1,21 @@
+{
+  "comments": [
+    {
+      "unresolved": false,
+      "key": {
+        "uuid": "e414f049_29dd3554",
+        "filename": "/PATCHSET_LEVEL",
+        "patchSetId": 1
+      },
+      "lineNbr": 0,
+      "author": {
+        "id": 1082649
+      },
+      "writtenOn": "2022-05-03T18:11:45Z",
+      "side": 1,
+      "message": "On non-CONFIG_INIT_STACK_ALL_ZERO\u003dy builds, this was leaving uninitialized stack contents in the first member struct.",
+      "revId": "3fa038b9762b73dc56a2122a18f094d895a06c0a",
+      "serverId": "85c56323-6fa9-3386-8a01-6480fb634889"
+    }
+  ]
+}
