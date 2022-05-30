@@ -1165,10 +1165,12 @@ static struct spi_driver sr100_driver = {
 static int __init sr100_dev_init(void)
 {
 	SR100_DBG_MSG("Entry : %s\n", __FUNCTION__);
-	debug_level = SR100_DEBUG_OFF;
 	return spi_register_driver(&sr100_driver);
 }
 module_init(sr100_dev_init);
+
+module_param(debug_level, byte, S_IRUGO | S_IWUSR);
+MODULE_PARM_DESC(debug_level, "Debug level (0=default,off, 1=INFO, 2=ALERT)");
 
 /******************************************************************************
  * Function    : sr100_dev_exit
