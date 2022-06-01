@@ -766,11 +766,11 @@ read_end:
  *
  * Returns     : retval 0 if ok else -1 on error
  ****************************************************************************/
-static int sr100_hw_setup(struct sr100_spi_platform_data* platform_data)
+static int sr100_hw_setup(struct device *dev, struct sr100_spi_platform_data* platform_data)
 {
 	int ret;
 	SR100_DBG_MSG("Entry : %s\n", __FUNCTION__);
-	ret = gpio_request(platform_data->irq_gpio, "sr100 irq");
+	ret = devm_gpio_request(dev, platform_data->irq_gpio, "sr100 irq");
 	if (ret < 0) {
 		SR100_ERR_MSG("gpio request failed gpio = 0x%x\n", platform_data->irq_gpio);
 		goto fail;
@@ -782,7 +782,7 @@ static int sr100_hw_setup(struct sr100_spi_platform_data* platform_data)
 		goto fail_irq;
 	}
 
-	ret = gpio_request(platform_data->ce_gpio, "sr100 ce");
+	ret = devm_gpio_request(dev, platform_data->ce_gpio, "sr100 ce");
 	if (ret < 0) {
 		SR100_ERR_MSG("gpio request failed gpio = 0x%x\n", platform_data->ce_gpio);
 		goto fail;
@@ -794,7 +794,7 @@ static int sr100_hw_setup(struct sr100_spi_platform_data* platform_data)
 		goto fail_gpio;
 	}
 
-	ret = gpio_request(platform_data->spi_handshake_gpio, "sr100 ri");
+	ret = devm_gpio_request(dev, platform_data->spi_handshake_gpio, "sr100 ri");
 	if (ret < 0) {
 		pr_info("sr100 - Failed requesting ri gpio - %d\n", platform_data->spi_handshake_gpio);
 		goto fail_gpio;
@@ -806,7 +806,7 @@ static int sr100_hw_setup(struct sr100_spi_platform_data* platform_data)
 		goto fail_gpio;
 	}
 #if HVH_VDD_ENABLE
-	ret = gpio_request(platform_data->vdd_1v8_gpio, "sup_vdd_1v8");
+	ret = devm_gpio_request(dev, platform_data->vdd_1v8_gpio, "sup_vdd_1v8");
 	if (ret) {
 		pr_info("%s:  sr100 vdd_1v8_gpio failed\n", __func__);
 		goto fail_gpio;
@@ -816,7 +816,7 @@ static int sr100_hw_setup(struct sr100_spi_platform_data* platform_data)
 		pr_err("%s : not able to set vdd_1v8_gpio as output\n", __func__);
 		goto fail_gpio;
 	}
-	ret = gpio_request(platform_data->vdd_1v8_rf_gpio, "sup_vdd_rf");
+	ret = devm_gpio_request(dev, platform_data->vdd_1v8_rf_gpio, "sup_vdd_rf");
 	if (ret) {
 		pr_info("%s:  sr100 vdd_1v8_rf_gpio failed\n", __func__);
 		goto fail_gpio;
@@ -826,7 +826,7 @@ static int sr100_hw_setup(struct sr100_spi_platform_data* platform_data)
 		pr_err("%s : not able to set vdd_1v8_rf_gpio as output\n", __func__);
 		goto fail_gpio;
 	}
-	ret = gpio_request(platform_data->vbat_3v6_gpio, "sup_vbat_3v6");
+	ret = devm_gpio_request(dev, platform_data->vbat_3v6_gpio, "sup_vbat_3v6");
 	if (ret) {
 		pr_info("%s:  sr100 sup_vbat_3v6 failed\n", __func__);
 		goto fail_gpio;
@@ -866,16 +866,8 @@ static int sr100_hw_setup(struct sr100_spi_platform_data* platform_data)
 	SR100_DBG_MSG("Exit : %s\n", __FUNCTION__);
 	return ret;
 
-fail_regulator:
 fail_gpio:
-	gpio_free(platform_data->spi_handshake_gpio);
-#if HVH_VDD_ENABLE
-	gpio_free(platform_data->vdd_1v8_gpio);
-	gpio_free(platform_data->vdd_1v8_rf_gpio);
-	gpio_free(platform_data->vbat_3v6_gpio);
-#endif
 fail_irq:
-	gpio_free(platform_data->irq_gpio);
 fail:
 	SR100_ERR_MSG("sr100_hw_setup failed\n");
 	return ret;
@@ -1009,7 +1001,7 @@ static int sr100_probe(struct spi_device* spi)
 		ret = -ENOMEM;
 		goto err_exit;
 	}
-	ret = sr100_hw_setup(platform_data);
+	ret = sr100_hw_setup(&spi->dev, platform_data);
 	if (ret < 0) {
 		SR100_ERR_MSG("Failed to sr100_enable_SR100_IRQ_ENABLE\n");
 		goto err_exit0;
@@ -1150,16 +1142,9 @@ static int sr100_remove(struct spi_device* spi)
 {
 	struct sr100_dev* sr100_dev = sr100_get_data(spi);
 	SR100_DBG_MSG("Entry : %s\n", __FUNCTION__);
-	gpio_free(sr100_dev->ce_gpio);
 	mutex_destroy(&sr100_dev->sr100_access_lock);
 	free_irq(sr100_dev->spi->irq, sr100_dev);
-	gpio_free(sr100_dev->irq_gpio);
-	gpio_free(sr100_dev->spi_handshake_gpio);
-#if HVH_VDD_ENABLE
-	gpio_free(sr100_dev->vdd_1v8_gpio);
-	gpio_free(sr100_dev->vdd_1v8_rf_gpio);
-	gpio_free(sr100_dev->vbat_3v6_gpio);
-#elif PMIC_VDD_ENABLE
+#if PMIC_VDD_ENABLE
 	regulator_disable(sr100_dev->regulator_1v8_rf);
 	regulator_disable(sr100_dev->regulator_1v8_dig);
 #endif
