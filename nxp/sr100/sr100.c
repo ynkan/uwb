@@ -357,7 +357,7 @@ static long sr100_dev_ioctl(struct file* filp, unsigned int cmd, unsigned long a
 				printk(KERN_ALERT " No of Read Bytes = %ld", sr100_through_put_t.total_through_put_rbytes);
 				printk(KERN_ALERT " Total Write Time (sec) = %ld.%09ld", sr100_through_put_t.total_through_put_wtime / 1000000000, sr100_through_put_t.total_through_put_wtime % 1000000000);
 				printk(KERN_ALERT " Total Read  Time (sec) = %ld.%09ld", sr100_through_put_t.total_through_put_rtime / 1000000000, sr100_through_put_t.total_through_put_rtime % 1000000000);
-				printk(KERN_ALERT " Total Write-Read Time (sec) = %ld.%09ld", 
+				printk(KERN_ALERT " Total Write-Read Time (sec) = %ld.%09ld",
                                                                   (sr100_through_put_t.total_through_put_wtime + sr100_through_put_t.total_through_put_rtime) / 1000000000,
                                                                   (sr100_through_put_t.total_through_put_wtime + sr100_through_put_t.total_through_put_rtime) % 1000000000);
 				sr100_through_put_t.total_through_put_wbytes = 0;
@@ -406,118 +406,115 @@ static int sr100_dev_transceive(struct sr100_dev* sr100_dev, int op_mode, int co
 	retry_count = 0;
 
 	switch(sr100_dev->mode) {
-		case SR100_WRITE_MODE: {
-				sr100_dev->write_count = 0;
-				/* UCI Header write */
-				ret = spi_write(sr100_dev->spi, sr100_dev->tx_buffer, NORMAL_MODE_HEADER_LEN);
-				if (ret < 0) {
-					ret = -EIO;
-					printk("spi_write header : Failed.\n");
-					goto transcive_end;
-				}
-				else {
-					count -= NORMAL_MODE_HEADER_LEN;
-				}
-				if(count > 0) {
-					usleep_range(30, 50);
-					/* UCI Payload write */
-					ret = spi_write(sr100_dev->spi, sr100_dev->tx_buffer + NORMAL_MODE_HEADER_LEN, count);
-					if (ret < 0) {
-						ret = -EIO;
-						printk("spi_write payload : Failed.\n");
-						goto transcive_end;
-					}
-				}
-				sr100_dev->write_count = count + NORMAL_MODE_HEADER_LEN;
-				ret = spi_transcive_success;
+	case SR100_WRITE_MODE:
+		sr100_dev->write_count = 0;
+		/* UCI Header write */
+		ret = spi_write(sr100_dev->spi, sr100_dev->tx_buffer, NORMAL_MODE_HEADER_LEN);
+		if (ret < 0) {
+			ret = -EIO;
+			printk("spi_write header : Failed.\n");
+			goto transcive_end;
+		}
+		else {
+			count -= NORMAL_MODE_HEADER_LEN;
+		}
+		if(count > 0) {
+			usleep_range(30, 50);
+			/* UCI Payload write */
+			ret = spi_write(sr100_dev->spi, sr100_dev->tx_buffer + NORMAL_MODE_HEADER_LEN, count);
+			if (ret < 0) {
+				ret = -EIO;
+				printk("spi_write payload : Failed.\n");
+				goto transcive_end;
 			}
-			break;
-		case SR100_READ_MODE: {
-				if(!gpio_get_value(sr100_dev->irq_gpio)) {
-					printk("IRQ might have gone low due to write ");
-					ret = spi_irq_wait_request;
-					goto transcive_end;
-				}
-				retry_count = 0;
-				gpio_set_value(sr100_dev->spi_handshake_gpio, 1);
-				while (gpio_get_value(sr100_dev->irq_gpio)) {
-					if (retry_count == 100) {
-						break;
-					}
-					udelay(10);
-					retry_count++;
-				}
-				sr100_enable_irq(sr100_dev);
-				sr100_dev->read_count = 0;
-				retry_count = 0;
-				/* wait for inetrrupt upto 500ms after that timeout will happen and returns read fail */
-				ret = wait_event_interruptible_timeout(sr100_dev->read_wq, sr100_dev->irq_received, sr100_dev->timeOutInMs);
-				if (ret == 0) {
-					printk("wait_event_interruptible timeout() : Failed.\n");
-					ret = spi_irq_wait_timeout;
-					goto transcive_end;
-				}
+		}
+		sr100_dev->write_count = count + NORMAL_MODE_HEADER_LEN;
+		ret = spi_transcive_success;
+		break;
+	case SR100_READ_MODE:
+		if(!gpio_get_value(sr100_dev->irq_gpio)) {
+			printk("IRQ might have gone low due to write ");
+			ret = spi_irq_wait_request;
+			goto transcive_end;
+		}
+		retry_count = 0;
+		gpio_set_value(sr100_dev->spi_handshake_gpio, 1);
+		while (gpio_get_value(sr100_dev->irq_gpio)) {
+			if (retry_count == 100) {
+				break;
+			}
+			udelay(10);
+			retry_count++;
+		}
+		sr100_enable_irq(sr100_dev);
+		sr100_dev->read_count = 0;
+		retry_count = 0;
+		/* wait for inetrrupt upto 500ms after that timeout will happen and returns read fail */
+		ret = wait_event_interruptible_timeout(sr100_dev->read_wq, sr100_dev->irq_received, sr100_dev->timeOutInMs);
+		if (ret == 0) {
+			printk("wait_event_interruptible timeout() : Failed.\n");
+			ret = spi_irq_wait_timeout;
+			goto transcive_end;
+		}
 #if 0 // ideally below code is not required to check the gpio status in loop
-				sr100_set_irq_flag(sr100_dev);
-				if(!gpio_get_value(sr100_dev->irq_gpio)) {
-					printk("Spurious interrupt detected at second irq");
-					retry_count++;
-					if(retry_count == MAX_READ_RETRY_COUNT) {
-						retry_count = 0;
-						printk("Max retry count reached at second irq");
-					}
-					else {
-						msleep(3);
-						sr100_dev->irq_enabled = false;
-						goto second_irq_wait;
-					}
-				}
-#endif
-				if(!gpio_get_value(sr100_dev->irq_gpio)) {
-					printk("Second IRQ is Low");
-					ret = -1;
-					goto transcive_end;
-				}
-				ret = spi_read(sr100_dev->spi, (void*)sr100_dev->rx_buffer, NORMAL_MODE_HEADER_LEN);
-				if (ret < 0) {
-					pr_info("sr100_dev_read: spi read error %d\n ", ret);
-					goto transcive_end;
-				}
-				sr100_dev->IsExtndLenIndication = (sr100_dev->rx_buffer[EXTND_LEN_INDICATOR_OFFSET] & EXTND_LEN_INDICATOR_OFFSET_MASK);
-				sr100_dev->totalBtyesToRead = sr100_dev->rx_buffer[NORMAL_MODE_LEN_OFFSET];
-				if(sr100_dev->IsExtndLenIndication) {
-					sr100_dev->totalBtyesToRead = ((sr100_dev->totalBtyesToRead << 8) | sr100_dev->rx_buffer[EXTENDED_LENGTH_OFFSET]);
-				}
-				if(sr100_dev->totalBtyesToRead > (MAX_UCI_PKT_SIZE - NORMAL_MODE_HEADER_LEN)) {
-					printk("Length %d  exceeds the max limit %d....", (int)sr100_dev->totalBtyesToRead, (int)MAX_UCI_PKT_SIZE);
-					ret = -1;
-					goto transcive_end;
-				}
-				if(sr100_dev->totalBtyesToRead > 0) {
-					ret = spi_read(sr100_dev->spi, (void*)(sr100_dev->rx_buffer + NORMAL_MODE_HEADER_LEN), sr100_dev->totalBtyesToRead);
-					if (ret < 0) {
-						printk("sr100_dev_read: spi read error.. %d\n ", ret);
-						goto transcive_end;
-					}
-				}
-				sr100_dev->read_count = (unsigned int)(sr100_dev->totalBtyesToRead + NORMAL_MODE_HEADER_LEN);
+		sr100_set_irq_flag(sr100_dev);
+		if(!gpio_get_value(sr100_dev->irq_gpio)) {
+			printk("Spurious interrupt detected at second irq");
+			retry_count++;
+			if(retry_count == MAX_READ_RETRY_COUNT) {
 				retry_count = 0;
-				do {
-					usleep_range(10, 15);
-					retry_count++;
-					if(retry_count == 1000) {
-						printk("Slave not released the IRQ even after 10ms");
-						break;
-					}
-				}
-				while(gpio_get_value(sr100_dev->irq_gpio));
-				ret = spi_transcive_success;
-				gpio_set_value(sr100_dev->spi_handshake_gpio, 0);
+				printk("Max retry count reached at second irq");
 			}
-			break;
-		default:
-			printk("invalid operation .....");
-			break;
+			else {
+				msleep(3);
+				sr100_dev->irq_enabled = false;
+				goto second_irq_wait;
+			}
+		}
+#endif
+		if(!gpio_get_value(sr100_dev->irq_gpio)) {
+			printk("Second IRQ is Low");
+			ret = -1;
+			goto transcive_end;
+		}
+		ret = spi_read(sr100_dev->spi, (void*)sr100_dev->rx_buffer, NORMAL_MODE_HEADER_LEN);
+		if (ret < 0) {
+			pr_info("sr100_dev_read: spi read error %d\n ", ret);
+			goto transcive_end;
+		}
+		sr100_dev->IsExtndLenIndication = (sr100_dev->rx_buffer[EXTND_LEN_INDICATOR_OFFSET] & EXTND_LEN_INDICATOR_OFFSET_MASK);
+		sr100_dev->totalBtyesToRead = sr100_dev->rx_buffer[NORMAL_MODE_LEN_OFFSET];
+		if(sr100_dev->IsExtndLenIndication) {
+			sr100_dev->totalBtyesToRead = ((sr100_dev->totalBtyesToRead << 8) | sr100_dev->rx_buffer[EXTENDED_LENGTH_OFFSET]);
+		}
+		if(sr100_dev->totalBtyesToRead > (MAX_UCI_PKT_SIZE - NORMAL_MODE_HEADER_LEN)) {
+			printk("Length %d  exceeds the max limit %d....", (int)sr100_dev->totalBtyesToRead, (int)MAX_UCI_PKT_SIZE);
+			ret = -1;
+			goto transcive_end;
+		}
+		if(sr100_dev->totalBtyesToRead > 0) {
+			ret = spi_read(sr100_dev->spi, (void*)(sr100_dev->rx_buffer + NORMAL_MODE_HEADER_LEN), sr100_dev->totalBtyesToRead);
+			if (ret < 0) {
+				printk("sr100_dev_read: spi read error.. %d\n ", ret);
+				goto transcive_end;
+			}
+		}
+		sr100_dev->read_count = (unsigned int)(sr100_dev->totalBtyesToRead + NORMAL_MODE_HEADER_LEN);
+		retry_count = 0;
+		do {
+			usleep_range(10, 15);
+			retry_count++;
+			if(retry_count == 1000) {
+				printk("Slave not released the IRQ even after 10ms");
+				break;
+			}
+		} while(gpio_get_value(sr100_dev->irq_gpio));
+		ret = spi_transcive_success;
+		gpio_set_value(sr100_dev->spi_handshake_gpio, 0);
+		break;
+	default:
+		printk("invalid operation .....");
+		break;
 	}
 transcive_end:
 	if(sr100_dev->mode == SR100_READ_MODE) {
