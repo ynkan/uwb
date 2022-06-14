@@ -708,10 +708,11 @@ static ssize_t sr100_dev_read(struct file* filp, char* buf, size_t count, loff_t
 	}
 	/*UCI packet read*/
 first_irq_wait:
+	retry_count++;
 	sr100_enable_irq(sr100_dev);
 	if(!read_abort_requested) {
-		ret = wait_event_interruptible(sr100_dev->read_wq, sr100_dev->irq_received);
-		if (ret) {
+		ret = wait_event_interruptible_timeout(sr100_dev->read_wq, sr100_dev->irq_received, sr100_dev->timeOutInMs);
+		if (!ret) {
 			printk("wait_event_interruptible() : Failed.\n");
 			SR100_DBG_MSG("wait_event_interruptible() : Failed.\n");
 			goto read_end;
@@ -736,7 +737,10 @@ first_irq_wait:
 	else if(ret == spi_irq_wait_request) {
 		printk(" irg is low due to write hence irq is requested again...");
 		SR100_DBG_MSG(" irg is low due to write hence irq is requested again...\n");
-		goto first_irq_wait;
+		if (retry_count >= 3)
+			goto read_end;
+		else
+			goto first_irq_wait;
 	}
 	else if(ret == spi_irq_wait_timeout) {
 		printk("second irq is not received..Time out...");
