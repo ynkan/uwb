@@ -432,7 +432,7 @@ static int sr100_dev_transceive(struct sr100_dev* sr100_dev, int op_mode, int co
 		ret = spi_transcive_success;
 		break;
 	case SR100_READ_MODE:
-		if(!gpio_get_value(sr100_dev->irq_gpio)) {
+		if (!is_fw_dwnld_enabled && !gpio_get_value(sr100_dev->irq_gpio)) {
 			printk("IRQ might have gone low due to write ");
 			ret = spi_irq_wait_request;
 			goto transcive_end;
@@ -540,6 +540,10 @@ static int sr100_hbci_write(struct sr100_dev* sr100_dev, int count)
 	int ret;
 	SR100_DBG_MSG("Entry : %s\n", __FUNCTION__);
 	sr100_dev->write_count = 0;
+
+	/* XXX: enable irq earlier than spi */
+	sr100_enable_irq(sr100_dev);
+
 	/* HBCI write */
 	ret = spi_write(sr100_dev->spi, sr100_dev->tx_buffer, count);
 	if (ret < 0) {
@@ -548,7 +552,6 @@ static int sr100_hbci_write(struct sr100_dev* sr100_dev, int count)
 		goto hbci_write_fail;
 	}
 	sr100_dev->write_count = count;
-	sr100_enable_irq(sr100_dev);
 	ret = spi_transcive_success;
 	return ret;
 hbci_write_fail:
@@ -645,10 +648,12 @@ static ssize_t sr100_hbci_read(struct sr100_dev *sr100_dev, char* buf, size_t co
 		return ret;
 	}
 
+#if 0	/* XXX: we've already received irq */
 	if(!gpio_get_value(sr100_dev->irq_gpio)) {
 		printk("IRQ is low during firmware download");
 		goto hbci_fail;
 	}
+#endif
 
 #if (ENABLE_THROUGHPUT_MEASUREMENT == 1)
 	sr100_start_throughput_measurement(READ_THROUGH_PUT);
