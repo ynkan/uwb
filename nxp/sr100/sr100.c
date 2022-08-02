@@ -120,10 +120,9 @@ struct sr100_dev {
 	unsigned int ce_gpio;           /* SW Reset gpio */
 	unsigned int irq_gpio;          /* SR100 will interrupt DH for any ntf */
 	unsigned int spi_handshake_gpio;     /* host ready to read data */
-	bool irq_enabled;               /* flag to indicate disable/enable irq sequence */
 	bool irq_received;              /* flag to indicate that irq is received */
 	bool pwr_enabled;               /* flag to indicate pwr */
-	spinlock_t irq_enabled_lock;    /* spin lock for read irq */
+	spinlock_t lock;                /* spin lock for read irq */
 	unsigned char* tx_buffer;       /* transmit buffer */
 	unsigned char* rx_buffer;       /* receive buffer buffer */
 	unsigned int write_count;       /* Holds nubers of  byte writen*/
@@ -244,15 +243,8 @@ static int sr100_dev_open(struct inode* inode, struct file* filp)
  ****************************************************************************/
 static void sr100_disable_irq(struct sr100_dev* sr100_dev)
 {
-	unsigned long flags;
 	SR100_DBG_MSG("Entry : %s\n", __FUNCTION__);
-	spin_lock_irqsave(&sr100_dev->irq_enabled_lock, flags);
-	if((sr100_dev->irq_enabled)) {
-		disable_irq_nosync(sr100_dev->spi->irq);
-		sr100_dev->irq_received = true;
-		sr100_dev->irq_enabled = false;
-	}
-	spin_unlock_irqrestore(&sr100_dev->irq_enabled_lock, flags);
+	disable_irq(sr100_dev->spi->irq);
 	SR100_DBG_MSG("Exit : %s\n", __FUNCTION__);
 }
 /******************************************************************************
@@ -266,15 +258,11 @@ static void sr100_disable_irq(struct sr100_dev* sr100_dev)
  ****************************************************************************/
 static void sr100_enable_irq(struct sr100_dev* sr100_dev)
 {
-	unsigned long flags;
 	SR100_DBG_MSG("Entry : %s\n", __FUNCTION__);
-	spin_lock_irqsave(&sr100_dev->irq_enabled_lock, flags);
-	if(!sr100_dev->irq_enabled) {
-		enable_irq(sr100_dev->spi->irq);
-		sr100_dev->irq_enabled = true;
-		sr100_dev->irq_received = false;
-	}
-	spin_unlock_irqrestore(&sr100_dev->irq_enabled_lock, flags);
+
+	sr100_dev->irq_received = false;
+	enable_irq(sr100_dev->spi->irq);
+
 	SR100_DBG_MSG("Exit : %s\n", __FUNCTION__);
 }
 
@@ -291,10 +279,16 @@ static void sr100_enable_irq(struct sr100_dev* sr100_dev)
 static irqreturn_t sr100_dev_irq_handler(int irq, void* dev_id)
 {
 	struct sr100_dev* sr100_dev = dev_id;
+
 	SR100_DBG_MSG("Entry : %s\n", __FUNCTION__);
-	sr100_disable_irq(sr100_dev);
+
+	spin_lock(&sr100_dev->lock);
+	sr100_dev->irq_received = true;
+	spin_unlock(&sr100_dev->lock);
+
 	/* Wake up waiting readers */
 	wake_up(&sr100_dev->read_wq);
+
 	SR100_DBG_MSG("Exit : %s\n", __FUNCTION__);
 	return IRQ_HANDLED;
 }
@@ -317,6 +311,34 @@ static void sr100_power_ctl(struct sr100_dev *sr100_dev, bool on)
 		gpio_set_value(sr100_dev->ce_gpio, 0);
 		msleep(10);
 	}
+}
+
+static int sr100_wait_irq(struct sr100_dev* sr100_dev, long timeout)
+{
+	int ret;
+	unsigned long flags;
+
+	SR100_DBG_MSG("Entry : %s\n", __FUNCTION__);
+
+	if (timeout) {
+		ret = wait_event_interruptible_timeout(sr100_dev->read_wq, sr100_dev->irq_received, timeout);
+		if (ret > 0)
+			ret = 0;
+		else if (ret == 0)
+			ret = -ETIMEDOUT;
+	} else {
+		ret = wait_event_interruptible(sr100_dev->read_wq, sr100_dev->irq_received);
+	}
+
+	if (!ret) {
+		spin_lock_irqsave(&sr100_dev->lock, flags);
+		sr100_dev->irq_received = false;
+		spin_unlock_irqrestore(&sr100_dev->lock, flags);
+	}
+
+	SR100_DBG_MSG("-%s(%d)\n", __FUNCTION__, ret);
+
+	return ret;
 }
 
 /******************************************************************************
@@ -348,7 +370,6 @@ static long sr100_dev_ioctl(struct file* filp, unsigned int cmd, unsigned long a
 			else if (arg == ABORT_READ_PENDING) {
 				pr_info("%s Abort Read Pending\n", __func__);
 				read_abort_requested = true;
-				sr100_disable_irq(sr100_dev);
 				/* Wake up waiting readers */
 				wake_up(&sr100_dev->read_wq);
 			}
@@ -430,8 +451,7 @@ static int sr100_dev_transceive(struct sr100_dev* sr100_dev, int op_mode, int co
 			ret = -EIO;
 			printk("spi_write header : Failed.\n");
 			goto transcive_end;
-		}
-		else {
+		} else {
 			count -= NORMAL_MODE_HEADER_LEN;
 		}
 		if(count > 0) {
@@ -449,55 +469,31 @@ static int sr100_dev_transceive(struct sr100_dev* sr100_dev, int op_mode, int co
 		break;
 	case SR100_READ_MODE:
 		if (!is_fw_dwnld_enabled && !gpio_get_value(sr100_dev->irq_gpio)) {
-			printk("IRQ might have gone low due to write ");
+			SR100_DBG_MSG("IRQ might have gone before RX_SYNC.\n");
 			ret = spi_irq_wait_request;
 			goto transcive_end;
 		}
-		retry_count = 0;
-		gpio_set_value(sr100_dev->spi_handshake_gpio, 1);
-		while (gpio_get_value(sr100_dev->irq_gpio)) {
-			if (retry_count == 100) {
-				break;
-			}
-			udelay(10);
-			retry_count++;
-		}
-		sr100_enable_irq(sr100_dev);
+
 		sr100_dev->read_count = 0;
-		retry_count = 0;
-		/* wait for inetrrupt upto 500ms after that timeout will happen and returns read fail */
-		ret = wait_event_interruptible_timeout(sr100_dev->read_wq, sr100_dev->irq_received, sr100_dev->timeOutInMs);
-		if (ret == 0) {
-			printk("wait_event_interruptible timeout() : Failed.\n");
+
+		SR100_DBG_MSG("RX_SYNC on\n");
+		gpio_set_value(sr100_dev->spi_handshake_gpio, 1);
+
+		/* waiting for the 2nd irq assertion after RX_SYNC */
+		ret = sr100_wait_irq(sr100_dev, sr100_dev->timeOutInMs);
+		if (ret < 0) {
+			SR100_DBG_MSG("Second IRQ is Low\n");
 			ret = spi_irq_wait_timeout;
 			goto transcive_end;
 		}
-#if 0 // ideally below code is not required to check the gpio status in loop
-		sr100_set_irq_flag(sr100_dev);
-		if(!gpio_get_value(sr100_dev->irq_gpio)) {
-			printk("Spurious interrupt detected at second irq");
-			retry_count++;
-			if(retry_count == MAX_READ_RETRY_COUNT) {
-				retry_count = 0;
-				printk("Max retry count reached at second irq");
-			}
-			else {
-				msleep(3);
-				sr100_dev->irq_enabled = false;
-				goto second_irq_wait;
-			}
-		}
-#endif
-		if(!gpio_get_value(sr100_dev->irq_gpio)) {
-			printk("Second IRQ is Low");
-			ret = -1;
-			goto transcive_end;
-		}
+
 		ret = spi_read(sr100_dev->spi, (void*)sr100_dev->rx_buffer, NORMAL_MODE_HEADER_LEN);
 		if (ret < 0) {
 			pr_info("sr100_dev_read: spi read error %d\n ", ret);
+			ret = spi_transcive_fail;
 			goto transcive_end;
 		}
+
 		sr100_dev->IsExtndLenIndication = (sr100_dev->rx_buffer[EXTND_LEN_INDICATOR_OFFSET] & EXTND_LEN_INDICATOR_OFFSET_MASK);
 		sr100_dev->totalBtyesToRead = sr100_dev->rx_buffer[NORMAL_MODE_LEN_OFFSET];
 		if(sr100_dev->IsExtndLenIndication) {
@@ -516,6 +512,8 @@ static int sr100_dev_transceive(struct sr100_dev* sr100_dev, int op_mode, int co
 			}
 		}
 		sr100_dev->read_count = (unsigned int)(sr100_dev->totalBtyesToRead + NORMAL_MODE_HEADER_LEN);
+
+		/* check the irq line state */
 		retry_count = 0;
 		do {
 			usleep_range(10, 15);
@@ -525,7 +523,10 @@ static int sr100_dev_transceive(struct sr100_dev* sr100_dev, int op_mode, int co
 				break;
 			}
 		} while(gpio_get_value(sr100_dev->irq_gpio));
+
 		ret = spi_transcive_success;
+
+		SR100_DBG_MSG("RX_SYNC off\n");
 		gpio_set_value(sr100_dev->spi_handshake_gpio, 0);
 		break;
 	default:
@@ -556,9 +557,6 @@ static int sr100_hbci_write(struct sr100_dev* sr100_dev, int count)
 	int ret;
 	SR100_DBG_MSG("Entry : %s\n", __FUNCTION__);
 	sr100_dev->write_count = 0;
-
-	/* XXX: enable irq earlier than spi */
-	sr100_enable_irq(sr100_dev);
 
 	/* HBCI write */
 	ret = spi_write(sr100_dev->spi, sr100_dev->tx_buffer, count);
@@ -650,8 +648,8 @@ static ssize_t sr100_hbci_read(struct sr100_dev *sr100_dev, char* buf, size_t co
 		goto hbci_fail;
 	}
 	/* wait for inetrrupt upto 500ms after that timeout will happen and returns read fail */
-	ret = wait_event_interruptible_timeout(sr100_dev->read_wq, sr100_dev->irq_received, sr100_dev->timeOutInMs);
-	if (ret == 0) {
+	ret = sr100_wait_irq(sr100_dev, sr100_dev->timeOutInMs);
+	if (ret < 0) {
 		printk("hbci wait_event_interruptible timeout() : Failed.\n");
 		ret = -1;
 		goto hbci_fail;
@@ -663,13 +661,6 @@ static ssize_t sr100_hbci_read(struct sr100_dev *sr100_dev, char* buf, size_t co
 		SR100_DBG_MSG("Exit : %s\n", __FUNCTION__);
 		return ret;
 	}
-
-#if 0	/* XXX: we've already received irq */
-	if(!gpio_get_value(sr100_dev->irq_gpio)) {
-		printk("IRQ is low during firmware download");
-		goto hbci_fail;
-	}
-#endif
 
 #if (ENABLE_THROUGHPUT_MEASUREMENT == 1)
 	sr100_start_throughput_measurement(READ_THROUGH_PUT);
@@ -712,39 +703,40 @@ static ssize_t sr100_dev_read(struct file* filp, char* buf, size_t count, loff_t
 	struct sr100_dev* sr100_dev = filp->private_data;
 	int ret = -EIO;
 	int retry_count = 0;
+
 	SR100_DBG_MSG("Entry : %s\n", __FUNCTION__);
-	/*500ms timeout in jiffies*/
-	sr100_dev->timeOutInMs = ((500 * HZ) / 1000);
+
 	memset(sr100_dev->rx_buffer, 0x00, SR100_RXBUF_SIZE);
-	if (!gpio_get_value(sr100_dev->irq_gpio)) {
-		if (filp->f_flags & O_NONBLOCK) {
-			ret = -EAGAIN;
-			goto read_end;
-		}
-	}
+
 	/*HBCI packet read*/
 	if(is_fw_dwnld_enabled) {
 		ret = sr100_hbci_read(sr100_dev, buf, count);
 		goto read_end;
 	}
+
 	/*UCI packet read*/
+	if (!sr100_dev->irq_received && (filp->f_flags & O_NONBLOCK)) {
+		ret = -EAGAIN;
+		goto read_end;
+	}
+
 first_irq_wait:
 	retry_count++;
-	sr100_enable_irq(sr100_dev);
-	if(!read_abort_requested) {
-		ret = wait_event_interruptible_timeout(sr100_dev->read_wq, sr100_dev->irq_received, sr100_dev->timeOutInMs);
-		if (!ret) {
+
+	if (!read_abort_requested) {
+		ret = sr100_wait_irq(sr100_dev, 0);
+		if (ret && !read_abort_requested) {
 			printk("wait_event_interruptible() : Failed.\n");
-			SR100_DBG_MSG("wait_event_interruptible() : Failed.\n");
 			goto read_end;
 		}
 	}
-	if(read_abort_requested) {
+	if (read_abort_requested) {
 		read_abort_requested = false;
 		printk("Abort Read pending......");
-		SR100_DBG_MSG("Abort Read pending......\n");
+		ret = -EINTR;
 		goto read_end;
 	}
+
 	ret = sr100_dev_transceive(sr100_dev, SR100_READ_MODE, count);
 	if(ret == spi_transcive_success) {
 		if (copy_to_user(buf, sr100_dev->rx_buffer, sr100_dev->read_count)) {
@@ -756,25 +748,23 @@ first_irq_wait:
 		ret = sr100_dev->read_count;
 	}
 	else if(ret == spi_irq_wait_request) {
-		printk(" irg is low due to write hence irq is requested again...");
-		SR100_DBG_MSG(" irg is low due to write hence irq is requested again...\n");
-		if (retry_count >= 3)
+		printk(" irq is low due to write hence irq is requested again...");
+		if (retry_count >= 3) {
+			ret = -ETIMEDOUT;
 			goto read_end;
-		else
+		} else {
 			goto first_irq_wait;
+		}
 	}
 	else if(ret == spi_irq_wait_timeout) {
 		printk("second irq is not received..Time out...");
-		SR100_DBG_MSG("second irq is not received..Time out...\n");
 		ret = -1;
 	}
 	else {
-		printk("spi read failed...%d", ret);
 		SR100_DBG_MSG("spi read failed...%d\n", ret);
 		ret = -1;
 	}
 read_end:
-	retry_count = 0;
 	SR100_DBG_MSG("Exit : %s\n", __FUNCTION__);
 	return ret;
 }
@@ -1072,7 +1062,7 @@ static int sr100_probe(struct spi_device* spi)
 	init_waitqueue_head(&sr100_dev->read_wq);
 	mutex_init(&sr100_dev->sr100_access_lock);
 
-	spin_lock_init(&sr100_dev->irq_enabled_lock);
+	spin_lock_init(&sr100_dev->lock);
 
 	ret = misc_register(&sr100_dev->sr100_device);
 	if (ret < 0) {
@@ -1090,10 +1080,10 @@ static int sr100_probe(struct spi_device* spi)
 	/* request irq.  the irq is set whenever the chip has data available
 	     * for reading.  it is cleared when all data has been read.
 	     */
-	//irq_flags = IRQF_TRIGGER_RISING;
-	irq_flags = IRQ_TYPE_LEVEL_HIGH;
-	sr100_dev->irq_enabled = true;
+	irq_flags = IRQF_TRIGGER_RISING;
+	//irq_flags = IRQ_TYPE_LEVEL_HIGH;
 	sr100_dev->irq_received = false;
+	sr100_dev->timeOutInMs = 500;
 
 	ret = request_irq(sr100_dev->spi->irq, sr100_dev_irq_handler, irq_flags,
 	                  sr100_dev->sr100_device.name, sr100_dev);
@@ -1101,7 +1091,7 @@ static int sr100_probe(struct spi_device* spi)
 		SR100_ERR_MSG("request_irq failed\n");
 		goto err_exit1;
 	}
-	sr100_disable_irq(sr100_dev);
+	//sr100_disable_irq(sr100_dev);
 	gpio_set_value(sr100_dev->ce_gpio, 0);
 #if HVH_VDD_ENABLE
 	gpio_set_value(sr100_dev->vdd_1v8_gpio, 1);
