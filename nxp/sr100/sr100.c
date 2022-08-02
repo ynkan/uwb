@@ -63,8 +63,7 @@
 /*Invoke cold reset if no response from eSE*/
 extern int ese_cold_reset(ese_cold_reset_origin_t src);
 #endif
-static bool read_abort_requested = false;
-static bool is_fw_dwnld_enabled = false;
+
 #define SR100_TXBUF_SIZE 4200
 #define SR100_RXBUF_SIZE 4200
 #define SR100_MAX_TX_BUF_SIZE 4200
@@ -120,9 +119,12 @@ struct sr100_dev {
 	unsigned int ce_gpio;           /* SW Reset gpio */
 	unsigned int irq_gpio;          /* SR100 will interrupt DH for any ntf */
 	unsigned int spi_handshake_gpio;     /* host ready to read data */
-	bool irq_received;              /* flag to indicate that irq is received */
+
+	atomic_t irq_received;          /* flag to indicate that irq is received */
+	atomic_t read_abort_requested;
 	bool pwr_enabled;               /* flag to indicate pwr */
-	spinlock_t lock;                /* spin lock for read irq */
+	bool is_fw_dwnld_enabled;
+
 	unsigned char* tx_buffer;       /* transmit buffer */
 	unsigned char* rx_buffer;       /* receive buffer buffer */
 	unsigned int write_count;       /* Holds nubers of  byte writen*/
@@ -260,7 +262,7 @@ static void sr100_enable_irq(struct sr100_dev* sr100_dev)
 {
 	SR100_DBG_MSG("Entry : %s\n", __FUNCTION__);
 
-	sr100_dev->irq_received = false;
+	atomic_set(&sr100_dev->irq_received, 0);
 	enable_irq(sr100_dev->spi->irq);
 
 	SR100_DBG_MSG("Exit : %s\n", __FUNCTION__);
@@ -282,9 +284,7 @@ static irqreturn_t sr100_dev_irq_handler(int irq, void* dev_id)
 
 	SR100_DBG_MSG("Entry : %s\n", __FUNCTION__);
 
-	spin_lock(&sr100_dev->lock);
-	sr100_dev->irq_received = true;
-	spin_unlock(&sr100_dev->lock);
+	atomic_set(&sr100_dev->irq_received, 1);
 
 	/* Wake up waiting readers */
 	wake_up(&sr100_dev->read_wq);
@@ -298,15 +298,14 @@ static void sr100_power_ctl(struct sr100_dev *sr100_dev, bool on)
 	if (on && !sr100_dev->pwr_enabled) {
 		printk(KERN_ALERT "UWB SR100 chip enable");
 
-		sr100_dev->pwr_enabled = 1;
+		sr100_dev->pwr_enabled = true;
 		gpio_set_value(sr100_dev->ce_gpio, 1);
 		msleep(10);
 		sr100_enable_irq(sr100_dev);
-		sr100_dev->irq_received = false;
 	} else if (!on && sr100_dev->pwr_enabled) {
 		printk(KERN_ALERT "UWB SR100 chip disable");
 
-		sr100_dev->pwr_enabled = 0;
+		sr100_dev->pwr_enabled = false;
 		sr100_disable_irq(sr100_dev);
 		gpio_set_value(sr100_dev->ce_gpio, 0);
 		msleep(10);
@@ -316,25 +315,22 @@ static void sr100_power_ctl(struct sr100_dev *sr100_dev, bool on)
 static int sr100_wait_irq(struct sr100_dev* sr100_dev, long timeout)
 {
 	int ret;
-	unsigned long flags;
 
 	SR100_DBG_MSG("Entry : %s\n", __FUNCTION__);
 
 	if (timeout) {
-		ret = wait_event_interruptible_timeout(sr100_dev->read_wq, sr100_dev->irq_received, timeout);
+		ret = wait_event_interruptible_timeout(sr100_dev->read_wq,
+				atomic_read(&sr100_dev->irq_received), timeout);
 		if (ret > 0)
 			ret = 0;
 		else if (ret == 0)
 			ret = -ETIMEDOUT;
 	} else {
-		ret = wait_event_interruptible(sr100_dev->read_wq, sr100_dev->irq_received);
+		ret = wait_event_interruptible(sr100_dev->read_wq, atomic_read(&sr100_dev->irq_received));
 	}
 
-	if (!ret) {
-		spin_lock_irqsave(&sr100_dev->lock, flags);
-		sr100_dev->irq_received = false;
-		spin_unlock_irqrestore(&sr100_dev->lock, flags);
-	}
+	if (!ret)
+		atomic_set(&sr100_dev->irq_received, 0);
 
 	SR100_DBG_MSG("-%s(%d)\n", __FUNCTION__, ret);
 
@@ -369,19 +365,19 @@ static long sr100_dev_ioctl(struct file* filp, unsigned int cmd, unsigned long a
 			}
 			else if (arg == ABORT_READ_PENDING) {
 				pr_info("%s Abort Read Pending\n", __func__);
-				read_abort_requested = true;
+				atomic_set(&sr100_dev->read_abort_requested, 1);
 				/* Wake up waiting readers */
 				wake_up(&sr100_dev->read_wq);
 			}
 			break;
 		case SR100_SET_FWD:
 			if (arg == 1) {
-				is_fw_dwnld_enabled = true;
-				read_abort_requested = false;
+				sr100_dev->is_fw_dwnld_enabled = true;
+				atomic_set(&sr100_dev->read_abort_requested, 0);
 				pr_info("%s FW download enabled.\n", __func__);
 			}
 			else if(arg == 0) {
-				is_fw_dwnld_enabled = false;
+				sr100_dev->is_fw_dwnld_enabled = false;
 				pr_info("%s FW download disabled.\n", __func__);
 			}
 			break;
@@ -468,7 +464,7 @@ static int sr100_dev_transceive(struct sr100_dev* sr100_dev, int op_mode, int co
 		ret = spi_transcive_success;
 		break;
 	case SR100_READ_MODE:
-		if (!is_fw_dwnld_enabled && !gpio_get_value(sr100_dev->irq_gpio)) {
+		if (!sr100_dev->is_fw_dwnld_enabled && !gpio_get_value(sr100_dev->irq_gpio)) {
 			SR100_DBG_MSG("IRQ might have gone before RX_SYNC.\n");
 			ret = spi_irq_wait_request;
 			goto transcive_end;
@@ -606,7 +602,7 @@ static ssize_t sr100_dev_write(struct file* filp, const char* buf, size_t count,
 #if (ENABLE_THROUGHPUT_MEASUREMENT == 1)
 	sr100_start_throughput_measurement(WRITE_THROUGH_PUT);
 #endif
-	if(is_fw_dwnld_enabled) {
+	if(sr100_dev->is_fw_dwnld_enabled) {
 		ret = sr100_hbci_write(sr100_dev, count);
 	}
 	else {
@@ -655,8 +651,7 @@ static ssize_t sr100_hbci_read(struct sr100_dev *sr100_dev, char* buf, size_t co
 		goto hbci_fail;
 	}
 
-	if (read_abort_requested) {
-		read_abort_requested = false;
+	if (atomic_cmpxchg(&sr100_dev->read_abort_requested, 1, 0)) {
 		printk("HBCI Abort Read pending......");
 		SR100_DBG_MSG("Exit : %s\n", __FUNCTION__);
 		return ret;
@@ -709,13 +704,13 @@ static ssize_t sr100_dev_read(struct file* filp, char* buf, size_t count, loff_t
 	memset(sr100_dev->rx_buffer, 0x00, SR100_RXBUF_SIZE);
 
 	/*HBCI packet read*/
-	if(is_fw_dwnld_enabled) {
+	if(sr100_dev->is_fw_dwnld_enabled) {
 		ret = sr100_hbci_read(sr100_dev, buf, count);
 		goto read_end;
 	}
 
 	/*UCI packet read*/
-	if (!sr100_dev->irq_received && (filp->f_flags & O_NONBLOCK)) {
+	if (!atomic_read(&sr100_dev->irq_received) && (filp->f_flags & O_NONBLOCK)) {
 		ret = -EAGAIN;
 		goto read_end;
 	}
@@ -723,15 +718,14 @@ static ssize_t sr100_dev_read(struct file* filp, char* buf, size_t count, loff_t
 first_irq_wait:
 	retry_count++;
 
-	if (!read_abort_requested) {
+	if (!atomic_read(&sr100_dev->read_abort_requested)) {
 		ret = sr100_wait_irq(sr100_dev, 0);
-		if (ret && !read_abort_requested) {
+		if (ret && !atomic_read(&sr100_dev->read_abort_requested)) {
 			printk("wait_event_interruptible() : Failed.\n");
 			goto read_end;
 		}
 	}
-	if (read_abort_requested) {
-		read_abort_requested = false;
+	if (atomic_cmpxchg(&sr100_dev->read_abort_requested, 1, 0)) {
 		printk("Abort Read pending......");
 		ret = -EINTR;
 		goto read_end;
@@ -1062,8 +1056,6 @@ static int sr100_probe(struct spi_device* spi)
 	init_waitqueue_head(&sr100_dev->read_wq);
 	mutex_init(&sr100_dev->sr100_access_lock);
 
-	spin_lock_init(&sr100_dev->lock);
-
 	ret = misc_register(&sr100_dev->sr100_device);
 	if (ret < 0) {
 		SR100_ERR_MSG("misc_register failed! %d\n", ret);
@@ -1082,7 +1074,8 @@ static int sr100_probe(struct spi_device* spi)
 	     */
 	irq_flags = IRQF_TRIGGER_RISING;
 	//irq_flags = IRQ_TYPE_LEVEL_HIGH;
-	sr100_dev->irq_received = false;
+	atomic_set(&sr100_dev->irq_received, 0);
+	atomic_set(&sr100_dev->read_abort_requested, 0);
 	sr100_dev->timeOutInMs = 500;
 
 	ret = request_irq(sr100_dev->spi->irq, sr100_dev_irq_handler, irq_flags,
@@ -1110,8 +1103,8 @@ static int sr100_probe(struct spi_device* spi)
 		goto exit_regulator;
 	}
 #endif
+	sr100_dev->pwr_enabled = true;
 	gpio_set_value(sr100_dev->ce_gpio, 1);
-	sr100_dev->pwr_enabled = 1;
 
 	SR100_DBG_MSG("Exit : %s\n", __FUNCTION__);
 	return ret;
