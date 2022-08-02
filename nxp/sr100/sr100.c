@@ -122,6 +122,7 @@ struct sr100_dev {
 	unsigned int spi_handshake_gpio;     /* host ready to read data */
 	bool irq_enabled;               /* flag to indicate disable/enable irq sequence */
 	bool irq_received;              /* flag to indicate that irq is received */
+	bool pwr_enabled;               /* flag to indicate pwr */
 	spinlock_t irq_enabled_lock;    /* spin lock for read irq */
 	unsigned char* tx_buffer;       /* transmit buffer */
 	unsigned char* rx_buffer;       /* receive buffer buffer */
@@ -298,6 +299,26 @@ static irqreturn_t sr100_dev_irq_handler(int irq, void* dev_id)
 	return IRQ_HANDLED;
 }
 
+static void sr100_power_ctl(struct sr100_dev *sr100_dev, bool on)
+{
+	if (on && !sr100_dev->pwr_enabled) {
+		printk(KERN_ALERT "UWB SR100 chip enable");
+
+		sr100_dev->pwr_enabled = 1;
+		gpio_set_value(sr100_dev->ce_gpio, 1);
+		msleep(10);
+		sr100_enable_irq(sr100_dev);
+		sr100_dev->irq_received = false;
+	} else if (!on && sr100_dev->pwr_enabled) {
+		printk(KERN_ALERT "UWB SR100 chip disable");
+
+		sr100_dev->pwr_enabled = 0;
+		sr100_disable_irq(sr100_dev);
+		gpio_set_value(sr100_dev->ce_gpio, 0);
+		msleep(10);
+	}
+}
+
 /******************************************************************************
  * Function    : sr100_dev_iotcl
  *
@@ -319,15 +340,10 @@ static long sr100_dev_ioctl(struct file* filp, unsigned int cmd, unsigned long a
 	switch (cmd) {
 		case SR100_SET_PWR:
 			if (arg == PWR_ENABLE) {
-				printk(KERN_ALERT "UWB SR100 chip enable");
-				gpio_set_value(sr100_dev->ce_gpio, 1);
-				msleep(10);
+				sr100_power_ctl(sr100_dev, true);
 			}
 			else if (arg == PWR_DISABLE) {
-				printk(KERN_ALERT "UWB SR100 chip disable");
-				gpio_set_value(sr100_dev->ce_gpio, 0);
-				sr100_disable_irq(sr100_dev);
-				msleep(10);
+				sr100_power_ctl(sr100_dev, false);
 			}
 			else if (arg == ABORT_READ_PENDING) {
 				pr_info("%s Abort Read Pending\n", __func__);
@@ -1105,6 +1121,7 @@ static int sr100_probe(struct spi_device* spi)
 	}
 #endif
 	gpio_set_value(sr100_dev->ce_gpio, 1);
+	sr100_dev->pwr_enabled = 1;
 
 	SR100_DBG_MSG("Exit : %s\n", __FUNCTION__);
 	return ret;
