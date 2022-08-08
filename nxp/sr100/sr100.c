@@ -235,40 +235,6 @@ static int sr100_dev_open(struct inode* inode, struct file* filp)
 }
 
 /******************************************************************************
- * Function    : sr100_disable_irq
- *
- * Description : To disable IR
- *
- * Parameters  : sr100_dev  :  sr100 device structure pointer
- *
- * Returns     : Returns void
- ****************************************************************************/
-static void sr100_disable_irq(struct sr100_dev* sr100_dev)
-{
-	SR100_DBG_MSG("Entry : %s\n", __FUNCTION__);
-	disable_irq(sr100_dev->spi->irq);
-	SR100_DBG_MSG("Exit : %s\n", __FUNCTION__);
-}
-/******************************************************************************
- * Function    : sr100_enable_irq
- *
- * Description : Set the irq flag status
- *
- * Parameters  : sr100_dev  :  sr100 device structure pointer
- *
- * Returns     : Returns void
- ****************************************************************************/
-static void sr100_enable_irq(struct sr100_dev* sr100_dev)
-{
-	SR100_DBG_MSG("Entry : %s\n", __FUNCTION__);
-
-	atomic_set(&sr100_dev->irq_received, 0);
-	enable_irq(sr100_dev->spi->irq);
-
-	SR100_DBG_MSG("Exit : %s\n", __FUNCTION__);
-}
-
-/******************************************************************************
  * Function    : sr100_dev_irq_handler
  *
  * Description : Will get called when interrupt line asserted from SR100
@@ -299,14 +265,16 @@ static void sr100_power_ctl(struct sr100_dev *sr100_dev, bool on)
 		printk(KERN_ALERT "UWB SR100 chip enable");
 
 		sr100_dev->pwr_enabled = true;
+
+		/* ignore the irq asserted from the last power cycle */
+		atomic_set(&sr100_dev->irq_received, 0);
+
 		gpio_set_value(sr100_dev->ce_gpio, 1);
 		msleep(10);
-		sr100_enable_irq(sr100_dev);
 	} else if (!on && sr100_dev->pwr_enabled) {
 		printk(KERN_ALERT "UWB SR100 chip disable");
 
 		sr100_dev->pwr_enabled = false;
-		sr100_disable_irq(sr100_dev);
 		gpio_set_value(sr100_dev->ce_gpio, 0);
 		msleep(10);
 	}
@@ -589,6 +557,10 @@ static ssize_t sr100_dev_write(struct file* filp, const char* buf, size_t count,
 	struct sr100_dev* sr100_dev;
 	SR100_DBG_MSG("Entry : %s\n", __FUNCTION__);
 	sr100_dev = filp->private_data;
+
+	if (!sr100_dev->pwr_enabled)
+		return -EIO;
+
 	if (count > SR100_MAX_TX_BUF_SIZE || count > SR100_TXBUF_SIZE) {
 		SR100_ERR_MSG("%s : Write Size Exceeds\n", __func__);
 		ret = -ENOBUFS;
@@ -700,6 +672,9 @@ static ssize_t sr100_dev_read(struct file* filp, char* buf, size_t count, loff_t
 	int retry_count = 0;
 
 	SR100_DBG_MSG("Entry : %s\n", __FUNCTION__);
+
+	if (!sr100_dev->pwr_enabled)
+		return -EIO;
 
 	memset(sr100_dev->rx_buffer, 0x00, SR100_RXBUF_SIZE);
 
@@ -1103,8 +1078,11 @@ static int sr100_probe(struct spi_device* spi)
 		goto exit_regulator;
 	}
 #endif
+
+#if 0
 	sr100_dev->pwr_enabled = true;
 	gpio_set_value(sr100_dev->ce_gpio, 1);
+#endif
 
 	SR100_DBG_MSG("Exit : %s\n", __FUNCTION__);
 	return ret;
