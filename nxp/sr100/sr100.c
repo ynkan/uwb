@@ -79,6 +79,7 @@ extern int ese_cold_reset(ese_cold_reset_origin_t src);
 #define USB_HSPHY_1P8_VOL_MIN			1704000 /* uV */
 #define USB_HSPHY_1P8_VOL_MAX			1800000 /* uV */
 #define USB_HSPHY_1P8_HPM_LOAD			19000	/* uA */
+#define USB_HSPHY_1P8_LOWPOWER_LOAD		1000	/* uA */
 
 /* Different driver debug lever */
 enum SR100_DEBUG_LEVEL { SR100_DEBUG_OFF, SR100_FULL_DEBUG, SR100_KERN_ALERT};
@@ -259,10 +260,28 @@ static irqreturn_t sr100_dev_irq_handler(int irq, void* dev_id)
 	return IRQ_HANDLED;
 }
 
-static void sr100_power_ctl(struct sr100_dev *sr100_dev, bool on)
+static int sr100_power_ctl(struct sr100_dev *sr100_dev, bool on)
 {
-	if (on && !sr100_dev->pwr_enabled) {
+	int ret = 0;
+
+	if (on) {
+		if (sr100_dev->pwr_enabled) {
+			pr_alert("UWB SR100 chip already enabled\n");
+			return 0;
+		}
 		printk(KERN_ALERT "UWB SR100 chip enable");
+
+		ret = regulator_set_load(sr100_dev->regulator_1v8_dig, USB_HSPHY_1P8_HPM_LOAD);
+		if (ret) {
+			pr_err("UWB SR100 Failed to set dig regulator load\n");
+			return ret;
+		}
+		ret = regulator_set_load(sr100_dev->regulator_1v8_rf, USB_HSPHY_1P8_HPM_LOAD);
+		if (ret) {
+			pr_err("UWB SR100 Failed to set rf regulator load\n");
+			return ret;
+		}
+		usleep_range(50, 100);
 
 		sr100_dev->pwr_enabled = true;
 
@@ -271,13 +290,31 @@ static void sr100_power_ctl(struct sr100_dev *sr100_dev, bool on)
 
 		gpio_set_value(sr100_dev->ce_gpio, 1);
 		msleep(10);
-	} else if (!on && sr100_dev->pwr_enabled) {
-		printk(KERN_ALERT "UWB SR100 chip disable");
+	} else if (!on) {
+		if (!sr100_dev->pwr_enabled) {
+			pr_alert("UWB SR100 chip already disabled\n");
+			return 0;
+		}
+		printk(KERN_ALERT "UWB SR100 chip disable\n");
 
-		sr100_dev->pwr_enabled = false;
 		gpio_set_value(sr100_dev->ce_gpio, 0);
 		msleep(10);
+
+		ret = regulator_set_load(sr100_dev->regulator_1v8_dig, USB_HSPHY_1P8_LOWPOWER_LOAD);
+		if (ret) {
+			pr_err("UWB SR100 Failed to set dig regulator load\n");
+			return ret;
+		}
+		ret = regulator_set_load(sr100_dev->regulator_1v8_rf, USB_HSPHY_1P8_LOWPOWER_LOAD);
+		if (ret) {
+			pr_err("UWB SR100 Failed to set rf regulator load\n");
+			return ret;
+		}
+
+		sr100_dev->pwr_enabled = false;
 	}
+
+	return ret;
 }
 
 static int sr100_wait_irq(struct sr100_dev* sr100_dev, long timeout)
@@ -326,10 +363,10 @@ static long sr100_dev_ioctl(struct file* filp, unsigned int cmd, unsigned long a
 	switch (cmd) {
 		case SR100_SET_PWR:
 			if (arg == PWR_ENABLE) {
-				sr100_power_ctl(sr100_dev, true);
+				ret = sr100_power_ctl(sr100_dev, true);
 			}
 			else if (arg == PWR_DISABLE) {
-				sr100_power_ctl(sr100_dev, false);
+				ret = sr100_power_ctl(sr100_dev, false);
 			}
 			else if (arg == ABORT_READ_PENDING) {
 				pr_info("%s Abort Read Pending\n", __func__);
@@ -820,7 +857,8 @@ static int sr100_hw_setup(struct device *dev, struct sr100_spi_platform_data* pl
 
 	pr_info(" HVH Power enable: %s \n", __func__);
 #elif PMIC_VDD_ENABLE
-	ret = regulator_set_load(platform_data->regulator_1v8_dig, USB_HSPHY_1P8_HPM_LOAD);
+	/* start with low power mode */
+	ret = regulator_set_load(platform_data->regulator_1v8_dig, USB_HSPHY_1P8_LOWPOWER_LOAD);
 	if (ret < 0) {
 		pr_err("Unable to set HPM of regulator_1v8_dig:%d\n", ret);
 		goto fail_gpio;
@@ -831,7 +869,7 @@ static int sr100_hw_setup(struct device *dev, struct sr100_spi_platform_data* pl
 		goto fail_gpio;
 	}
 
-	ret = regulator_set_load(platform_data->regulator_1v8_rf, USB_HSPHY_1P8_HPM_LOAD);
+	ret = regulator_set_load(platform_data->regulator_1v8_rf, USB_HSPHY_1P8_LOWPOWER_LOAD);
 	if (ret < 0) {
 		pr_err("Unable to set HPM of regulator_1v8_rf:%d\n", ret);
 		goto fail_gpio;
