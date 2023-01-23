@@ -1104,7 +1104,7 @@ static struct mcps802154_local *mcps802154_get_from_info(struct genl_info *info)
  *
  * Return: 0 or error.
  */
-static int mcps802154_nl_pre_doit(const struct genl_ops *ops,
+static int mcps802154_nl_pre_doit(const struct genl_split_ops *ops,
 				  struct sk_buff *skb, struct genl_info *info)
 {
 	struct mcps802154_local *local;
@@ -1130,7 +1130,7 @@ static int mcps802154_nl_pre_doit(const struct genl_ops *ops,
  *
  * Release RTNL if needed.
  */
-static void mcps802154_nl_post_doit(const struct genl_ops *ops,
+static void mcps802154_nl_post_doit(const struct genl_split_ops *ops,
 				    struct sk_buff *skb, struct genl_info *info)
 {
 	if (ops->internal_flags & MCPS802154_NL_NEED_HW)
