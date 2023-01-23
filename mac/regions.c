@@ -198,8 +198,7 @@ void mcps802154_region_xmit_done(struct mcps802154_llhw *llhw,
 	if (ok) {
 		ieee802154_xmit_complete(local->hw, skb, false);
 	} else {
-		ieee802154_wake_queue(local->hw);
-		dev_kfree_skb_any(skb);
+		ieee802154_xmit_hw_error(local->hw, skb);
 	}
 }
 EXPORT_SYMBOL_GPL(mcps802154_region_xmit_done);
