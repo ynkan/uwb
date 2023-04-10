@@ -420,6 +420,16 @@ static long sr100_dev_ioctl(struct file* filp, unsigned int cmd, unsigned long a
 
 	return ret;
 }
+
+#if defined(CONFIG_COMPAT)
+static long sr100_dev_ioctl_compat(struct file* filp, unsigned int cmd, unsigned long arg)
+{
+	return sr100_dev_ioctl(filp, cmd, arg);
+}
+#else
+#define sr100_dev_ioctl_compat NULL
+#endif
+
 /******************************************************************************
 * Function    : sr100_dev_transceive
 *
@@ -929,6 +939,7 @@ static const struct file_operations sr100_dev_fops = {
 	.write = sr100_dev_write,
 	.open = sr100_dev_open,
 	.unlocked_ioctl = sr100_dev_ioctl,
+	.compat_ioctl = sr100_dev_ioctl_compat,
 };
 /******************************************************************************
  * Function    : sr100_parse_dt
