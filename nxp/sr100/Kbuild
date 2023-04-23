@@ -1,1 +1,2 @@
 obj-m += sr100.o
+sr100-y := sr1xx.o
