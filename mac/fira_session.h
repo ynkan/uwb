@@ -1,7 +1,7 @@
 /*
  * This file is part of the UWB stack for linux.
  *
- * Copyright (c) 2020-2021 Qorvo US, Inc.
+ * Copyright (c) 2020-2022 Qorvo US, Inc.
  *
  * This software is provided under the GNU General Public License, version 2
  * (GPLv2), as well as under a Qorvo commercial license.
@@ -24,23 +24,81 @@
 #ifndef NET_MCPS802154_FIRA_SESSION_H
 #define NET_MCPS802154_FIRA_SESSION_H
 
+#include "fira_session_fsm.h"
 #include "fira_region.h"
+#include "fira_sts.h"
 #include "fira_crypto.h"
 #include "fira_round_hopping_crypto_impl.h"
 
-enum fira_session_state {
-	SESSION_STATE_INIT = 0x00,
-	SESSION_STATE_DEINIT = 0x01,
-	SESSION_STATE_ACTIVE = 0x02,
-	SESSION_STATE_IDLE = 0x03,
-	// RFU 0x04 - 0xff
-	// UCI_SESSION_STATE_ERROR = 0xff,
+/**
+ * enum fira_controlee_state - State of controlee.
+ * @FIRA_CONTROLEE_STATE_PENDING_RUN: The controlee will be set to running state
+ * at the end of round.
+ * @FIRA_CONTROLEE_STATE_RUNNING: The controlee is running.
+ * @FIRA_CONTROLEE_STATE_PENDING_STOP: The controlee will be set to stopping
+ * state at the end of round.
+ * @FIRA_CONTROLEE_STATE_STOPPING: The controlee is stopping.
+ * @FIRA_CONTROLEE_STATE_PENDING_DEL: The controlee will be set to deleting
+ * state at the end of round.
+ * @FIRA_CONTROLEE_STATE_DELETING: The controlee is being deleted.
+ */
+enum fira_controlee_state {
+	FIRA_CONTROLEE_STATE_PENDING_RUN,
+	FIRA_CONTROLEE_STATE_RUNNING,
+	FIRA_CONTROLEE_STATE_PENDING_STOP,
+	FIRA_CONTROLEE_STATE_STOPPING,
+	FIRA_CONTROLEE_STATE_PENDING_DEL,
+	FIRA_CONTROLEE_STATE_DELETING,
 };
 
-struct fira_controlees_array {
-	struct fira_controlee data[FIRA_CONTROLEES_MAX];
-	/* Number of data valid. */
-	size_t size;
+/**
+ * struct fira_controlee - Represent a controlee.
+ */
+struct fira_controlee {
+	/**
+	 * @sub_session_id: Sub-session ID used by the controlee.
+	 */
+	__u32 sub_session_id;
+	/**
+	 * @short_addr: Short address of the controlee.
+	 */
+	__le16 short_addr;
+	/**
+	 * @sub_session_key_len: Length of the sub-session key used by
+	 * the controlee.
+	 */
+	__u8 sub_session_key_len;
+	/**
+	 * @sub_session_key: Sub-session key used by the controlee.
+	 */
+	char sub_session_key[FIRA_KEY_SIZE_MAX];
+	/**
+	 * @sub_session: Is the controlee using a sub-session.
+	 */
+	bool sub_session;
+	/**
+	 * @state: Current state of the controlee.
+	 */
+	enum fira_controlee_state state;
+	/**
+	 * @entry: Entry in list of controlees.
+	 */
+	struct list_head entry;
+};
+
+struct fira_measurement_sequence_step {
+	enum fira_measurement_type type;
+	u8 n_measurements;
+	s8 rx_ant_set_nonranging;
+	s8 rx_ant_sets_ranging[2];
+	s8 tx_ant_set_nonranging;
+	s8 tx_ant_set_ranging;
+};
+
+struct fira_measurement_sequence {
+	struct fira_measurement_sequence_step
+		steps[FIRA_MEASUREMENT_SEQUENCE_STEP_MAX];
+	size_t n_steps;
 };
 
 struct fira_session_params {
@@ -56,10 +114,11 @@ struct fira_session_params {
 	int block_duration_dtu;
 	int round_duration_slots;
 	/* Behaviour parameters. */
-	int max_number_of_measurements;
-	int max_rr_retry;
+	u32 block_stride_len;
+	u32 max_number_of_measurements;
+	u32 max_rr_retry;
 	bool round_hopping;
-	int priority;
+	u8 priority;
 	bool result_report_phase;
 	/* Radio. */
 	int channel_number;
@@ -67,26 +126,36 @@ struct fira_session_params {
 	enum fira_rframe_config rframe_config;
 	enum fira_preambule_duration preamble_duration;
 	enum fira_sfd_id sfd_id;
+	enum fira_sts_segments number_of_sts_segments;
 	enum fira_psdu_data_rate psdu_data_rate;
 	enum fira_mac_fcs_type mac_fcs_type;
+	enum fira_prf_mode prf_mode;
+	enum fira_phr_data_rate phr_data_rate;
 	/* STS and crypto. */
-	enum fira_sts_config sts_config;
+	enum fira_sts_mode sts_config;
 	u8 vupper64[FIRA_VUPPER64_SIZE];
-	size_t n_controlees_max;
+	u8 session_key_len;
+	u8 session_key[FIRA_KEY_SIZE_MAX];
+	bool key_rotation;
+	u8 key_rotation_rate;
 	bool aoa_result_req;
 	bool report_tof;
 	bool report_aoa_azimuth;
 	bool report_aoa_elevation;
 	bool report_aoa_fom;
-	u8 rx_antenna_selection;
-	u8 rx_antenna_pair_azimuth;
-	u8 rx_antenna_pair_elevation;
-	u8 tx_antenna_selection;
-	u8 rx_antenna_switch;
+	enum fira_rssi_report_type report_rssi;
+	struct fira_measurement_sequence meas_seq;
 	u32 data_vendor_oui;
 	u8 data_payload[FIRA_DATA_PAYLOAD_SIZE_MAX];
 	u32 data_payload_seq;
 	int data_payload_len;
+	bool report_diagnostics;
+	enum fira_ranging_diagnostics_frame_report_flags diagnostic_report_flags;
+	/* Misc */
+	enum fira_sts_length sts_length;
+	enum fira_range_data_ntf_config range_data_ntf_config;
+	u32 range_data_ntf_proximity_near_mm;
+	u32 range_data_ntf_proximity_far_mm;
 };
 
 /**
@@ -98,56 +167,77 @@ struct fira_session {
 	 */
 	u32 id;
 	/**
-	 * @state: Session state.
+	 * @sequence_number: Session notification counter.
 	 */
-	enum fira_session_state state;
+	u32 sequence_number;
 	/**
 	 * @entry: Entry in list of sessions.
 	 */
 	struct list_head entry;
+	/**
+	 * @state: State of the session.
+	 */
+	const struct fira_session_fsm_state *state;
 	/**
 	 * @params: Session parameters, mostly read only while the session is
 	 * active.
 	 */
 	struct fira_session_params params;
 	/**
-	 * @block_start_dtu: Timestamp of the current or previous block. All
-	 * other fields are referring to this same block.
+	 * @hrp_uwb_params: HRP UWB parameters, read only while the session is
+	 * active.
+	 */
+	struct mcps802154_hrp_uwb_params hrp_uwb_params;
+	/**
+	 * @event_portid: Port identifier to use for notifications.
+	 */
+	u32 event_portid;
+	/**
+	 * @block_start_valid: True when block_start_dtu is valid.
+	 * It's false on the first access wo initiation delay.
+	 */
+	bool block_start_valid;
+	/**
+	 * @block_start_dtu: Block start timestamp in dtu of the last
+	 * get_access.
 	 */
 	u32 block_start_dtu;
 	/**
-	 * @block_index: Block index of the reference block.
+	 * @next_access_timestamp_dtu: Next access timestamp in dtu.
+	 * It's equal to block_start_dtu when the hopping is disabled.
+	 * Otherwise it's beyond the block_start_dtu.
+	 * It's updated after each good or missed ranging round.
+	 */
+	u32 next_access_timestamp_dtu;
+	/**
+	 * @last_access_timestamp_dtu: Last timestamp where the session got
+	 * the access.
+	 * It's used only on session's election, when a negotiation between
+	 * two session fails.
+	 */
+	u32 last_access_timestamp_dtu;
+	/**
+	 * @block_index: Block index used on the last access.
 	 */
 	u32 block_index;
 	/**
-	 * @sts_index: STS index value at reference block start.
+	 * @block_stride_len: Stride length indicates how many ranging blocks
+	 * will be skipped.
+	 * The value is updated at the beginning of an access.
 	 */
-	u32 sts_index;
+	int block_stride_len;
 	/**
-	 * @hopping_sequence_generation: Whether to compute round index from ranging round sequence.
-	 */
-	bool hopping_sequence_generation;
-	/**
-	 * @round_index: Round index of the reference block.
+	 * @round_index: Round index used on the last access.
 	 */
 	int round_index;
 	/**
-	 * @next_round_index: Round index of the block after the reference block.
+	 * @next_round_index: Next round index a announced in measurement
+	 * report message.
 	 */
 	int next_round_index;
 	/**
-	 * @tx_ant: Antenna index to use for transmission in the reference
-	 * block.
-	 */
-	int tx_ant;
-	/**
-	 * @rx_ant_pair: Antenna pair indexes to use for reception in the
-	 * reference block.
-	 */
-	int rx_ant_pair[2];
-	/**
-	 * @stop_request: Session has been requested to stop.
-	 */
+	* @stop_request: Session has been requested to stop.
+	*/
 	bool stop_request;
 	/**
 	 * @stop_inband: Session has been requested to stop by controller. This
@@ -156,66 +246,201 @@ struct fira_session {
 	bool stop_inband;
 	/**
 	 * @stop_no_response: Session has been requested to stop because ranging
-	 * failed for max_rr_retry consecutives rounds.
+	 * failed for max_rr_retry consecutive rounds.
 	 */
 	bool stop_no_response;
 	/**
-	 * @max_number_of_measurements_reached: Session has been requested to stop
-	 * because max_number_of_measurements was reached.
+	 * @n_ranging_round_retry: Number of ranging round failed.
+	 * Counter reset on ranging round success.
 	 */
-	bool max_number_of_measurements_reached;
-	/**
-	 * @crypto: Crypto context.
-	 */
-	struct fira_crypto crypto;
+	int n_ranging_round_retry;
+
 	/**
 	 * @round_hopping_sequence: Round hopping sequence generation context.
 	 */
 	struct fira_round_hopping_sequence round_hopping_sequence;
 	/**
-	 * @event_portid: Port identifier to use for notifications.
+	 * @controlee: Group of persistent variable(s) used when session
+	 * is a controlee.
 	 */
-	u32 event_portid;
+	struct {
+		/**
+		 * @synchronised: Whether a controlee session was synchronised.
+		 */
+		bool synchronised;
+		/**
+		 * @block_index_sync: Last block index received.
+		 */
+		int block_index_sync;
+		/**
+		 * @hopping_mode: True when hopping is enabled on last
+		 * measurement frame.
+		 */
+		bool hopping_mode;
+		/**
+		 * @next_round_index_valid: True when the next round index
+		 * is present in measurement report frame.
+		 */
+		bool next_round_index_valid;
+	} controlee;
 	/**
-	 * @synchronised: Whether a controlee session was synchronised. This
-	 * field is not used for controller sessions.
+	 * @controller: Group of persistent variable(s) used when session
+	 * is a controller.
 	 */
-	bool synchronised;
+	struct {
+		/**
+		 * @next_block_index: Next block index built on get access with
+		 * next round index.
+		 * It's only to avoid to rebuild the next round index on next
+		 * access, when this last occur in time as block index will
+		 * match.
+		 */
+		u32 next_block_index;
+	} controller;
 	/**
-	 * @last_access_timestamp_dtu: Timestamp of the last computed access.
+	 * @data_payload: Local context for data_payload feature.
 	 */
-	u32 last_access_timestamp_dtu;
+	struct {
+		/**
+		 * @seq: Sequence number of last sent data.
+		 */
+		u32 seq;
+		/**
+		 * @sent: True when data have been send during ranging round.
+		 */
+		bool sent;
+	} data_payload;
 	/**
-	 * @last_access_duration_dtu: Duration of the last computed access.
+	 * @current_controlees: Current list of controlees.
 	 */
-	u32 last_access_duration_dtu;
+	struct list_head current_controlees;
 	/**
-	 * @data_payload_seq_sent: Sequence number of last sent data.
+	 * @n_current_controlees: Number of elements in the list of current
+	 * controlees.
 	 */
-	u32 data_payload_seq_sent;
+	size_t n_current_controlees;
 	/**
-	 * @last_block_index: Block index of the last successful ranging.
+	 * @measurements: Measurement configurations which influence diagnostics.
 	 */
-	u32 last_block_index;
+	struct {
+		/**
+		 * @sequence: Copy of the meas_seq parameter on get_access
+		 * event.
+		 */
+		struct fira_measurement_sequence sequence;
+		/**
+		 * @index: Index of the step in sequence array.
+		 */
+		int index;
+		/**
+		 * @n_achieved: Number of measurements done inside a step.
+		 */
+		int n_achieved;
+		/**
+		 * @n_total_achieved: Total number of measurements done.
+		 */
+		int n_total_achieved;
+		/**
+		 * @reset: True when new parameters have to be retrieved.
+		 */
+		bool reset;
+	} measurements;
 	/**
-	 * @new_controlees: List of controlees to applies on next ca.
+	 * @rx_ctx: Custom rx context for all controlees.
 	 */
-	struct fira_controlees_array new_controlees;
+	void *rx_ctx[FIRA_CONTROLEES_MAX];
 	/**
-	 * @current_controlees: List of controlees currently applied.
+	 * @crypto: crypto related variables.
 	 */
-	struct fira_controlees_array current_controlees;
+	struct fira_crypto *crypto;
 	/**
-	 * @controlee_management_flags: Flags used to indicates if the list of
-	 * controlees must be updated and if any controlee must be stopped
-	 * before allowing updates again. See
-	 * &fira_session_controlee_management_flags.
+	 * @sts: sts related variables.
 	 */
-	u32 controlee_management_flags;
+	struct {
+		/**
+		 * @phy_sts_index_init: Initial phy_sts_index deduced at context init.
+		 */
+		u32 phy_sts_index_init;
+
+		/**
+		 * @last_rotation_block_index: index to the last block where the
+		 * rotation occurred.
+		 */
+		u32 last_rotation_block_index;
+	} sts;
+	/*
+	 * @last_error: last error that occurred during the active session.
+	 */
+	int last_error;
+};
+
+/**
+ * struct fira_session_demand - Next access information for one FiRa session.
+ */
+struct fira_session_demand {
 	/**
-	 * @number_of_measurements: Number of measurements.
+	 * @block_start_dtu: Block start in dtu.
 	 */
-	u32 number_of_measurements;
+	u32 block_start_dtu;
+	/**
+	 * @timestamp_dtu: Access timestamp in dtu.
+	 */
+	u32 timestamp_dtu;
+	/**
+	 * @max_duration_dtu: Maximum duration for the access.
+	 */
+	int max_duration_dtu;
+	/**
+	 * @add_blocks: Number of block to add.
+	 */
+	int add_blocks;
+	/**
+	 * @round_index: Round index to apply for the access.
+	 */
+	int round_index;
+	/**
+	 * @rx_timeout_dtu: timeout to apply when first frame of the controlee.
+	 */
+	int rx_timeout_dtu;
+};
+
+/**
+ * struct fira_report_info - Report information for all peer.
+ */
+struct fira_report_info {
+	/**
+	 * @ranging_data: Base address of ranging data per peer, or null
+	 * pointer.
+	 */
+	const struct fira_ranging_info *ranging_data;
+	/**
+	 * @n_ranging_data: Number of entry in ranging_data above.
+	 */
+	size_t n_ranging_data;
+	/**
+	 * @stopped_controlees: NULL, or short address of all stopped controlees.
+	 */
+	const __le16 *stopped_controlees;
+	/**
+	 * @n_stopped_controlees: Number of controlees stopped in array above.
+	 */
+	size_t n_stopped_controlees;
+	/**
+	 * @diagnostics: Array of diagnostic collected per slots.
+	 */
+	const struct fira_diagnostic *diagnostics;
+	/**
+	 * @slots: Array of information slots.
+	 */
+	const struct fira_slot *slots;
+	/**
+	 * @n_slots: Number of slots above.
+	 */
+	size_t n_slots;
+	/**
+	 * @stopped: True when the session is stopped.
+	 */
+	bool stopped;
 };
 
 /**
@@ -235,66 +460,71 @@ struct fira_session *fira_session_new(struct fira_local *local, u32 session_id);
 void fira_session_free(struct fira_local *local, struct fira_session *session);
 
 /**
- * fira_session_get() - Get a session by its identifier.
+ * fira_session_set_controlees() - Set controlees.
  * @local: FiRa context.
- * @session_id: Session identifier.
- * @active: When session is found set to true if active, false if inactive.
+ * @session: Session.
+ * @controlees: List of controlees.
+ * @n_controlees: Number of controlees.
  *
- * Return: The session or NULL if not found.
+ * Return: 0 or error.
  */
-struct fira_session *fira_session_get(struct fira_local *local, u32 session_id,
-				      bool *active);
-
-/**
- * fira_session_copy_controlees() - copy controlees array between two array.
- * @to: FiRa controlees array to write.
- * @from: FiRa controlees array to read.
- */
-void fira_session_copy_controlees(struct fira_controlees_array *to,
-				  const struct fira_controlees_array *from);
+int fira_session_set_controlees(struct fira_local *local,
+				struct fira_session *session,
+				struct list_head *controlees, int n_controlees);
 
 /**
  * fira_session_new_controlees() - Add new controlees.
- * @local: FiRa context.
  * @session: Session.
- * @controlees_array: Destination array where store new controlees list.
- * @controlees: Controlees information.
+ * @controlees: List of controlees to add.
  * @n_controlees: Number of controlees.
+ * @async: True is the controlees must be added asynchronously.
  *
  * Return: 0 or error.
  */
-int fira_session_new_controlees(struct fira_local *local,
-				struct fira_session *session,
-				struct fira_controlees_array *controlees_array,
-				const struct fira_controlee *controlees,
-				size_t n_controlees);
+int fira_session_new_controlees(struct fira_session *session,
+				struct list_head *controlees, int n_controlees,
+				bool async);
 
 /**
- * fira_session_del_controlees() - Set flag to indicate that controlees are
- * to be stopped then deleted.
- * @local: FiRa context.
+ * fira_session_restart_controlees() - Restart controlee and erase pending del.
+ * @session: FiRa session context.
+ *
+ * Return: Number of controlee removed.
+ */
+void fira_session_restart_controlees(struct fira_session *session);
+
+/**
+ * fira_session_del_controlees() - Delete controlees.
  * @session: Session.
- * @controlees_array: Destination array where store new controlees list.
- * @controlees: Controlees information.
- * @n_controlees: Number of controlees.
+ * @controlees: List of controlees to delete.
+ * @async: True is the controlees must be deleted asynchronously.
  *
  * Return: 0 or error.
  */
-int fira_session_del_controlees(struct fira_local *local,
-				struct fira_session *session,
-				struct fira_controlees_array *controlees_array,
-				const struct fira_controlee *controlees,
-				size_t n_controlees);
+int fira_session_del_controlees(struct fira_session *session,
+				struct list_head *controlees, bool async);
 
 /**
  * fira_session_stop_controlees() - Stop controlees.
- * @local: FiRa context.
  * @session: Session.
- * @controlees_array: Destination array where store new controlees list.
  */
-void fira_session_stop_controlees(
-	struct fira_local *local, struct fira_session *session,
-	struct fira_controlees_array *controlees_array);
+void fira_session_stop_controlees(struct fira_session *session);
+
+/**
+ * fira_session_controlees_running_count() - Get the number of running controlees.
+ * @session: Session.
+ *
+ * Return: Number of running controlees.
+ */
+int fira_session_controlees_running_count(const struct fira_session *session);
+
+/**
+ * fira_session_update_controlees() - Update controlee's states.
+ * @local: FiRa context.
+ * @session: Session to test.
+ */
+void fira_session_update_controlees(struct fira_local *local,
+				    struct fira_session *session);
 
 /**
  * fira_session_is_ready() - Test whether a session is ready to be started.
@@ -303,85 +533,88 @@ void fira_session_stop_controlees(
  *
  * Return: true if the session can be started.
  */
-bool fira_session_is_ready(struct fira_local *local,
-			   struct fira_session *session);
+bool fira_session_is_ready(const struct fira_local *local,
+			   const struct fira_session *session);
 
 /**
- * fira_session_next() - Find the next session to use after the given timestamp.
- * @local: FiRa context.
- * @next_timestamp_dtu: Next access opportunity.
- * @max_access_duration_dtu: Maximum access duration.
- *
- * Return: The session or NULL if none.
- */
-struct fira_session *fira_session_next(struct fira_local *local,
-				       u32 next_timestamp_dtu,
-				       u32 max_access_duration_dtu);
-
-/**
- * fira_session_round_hopping() - Update round index for round hopping.
- * @session: Session to update.
- */
-void fira_session_round_hopping(struct fira_session *session);
-
-/**
- * fira_session_resync() - Resync session parameters on control message.
- * @local: FiRa context.
- * @session: Session to synchronize.
- * @sts_index: STS index of control message.
- * @timestamp_dtu: Timestamp of control message.
- */
-void fira_session_resync(struct fira_local *local, struct fira_session *session,
-			 u32 sts_index, u32 timestamp_dtu);
-
-/**
- * fira_session_access_done() - Update session at end of access, or on event
- * when no access is active.
- * @local: FiRa context.
- * @session: Session.
- * @add_measurements: True to add measurements to report.
- */
-void fira_session_access_done(struct fira_local *local,
-			      struct fira_session *session,
-			      bool add_measurements);
-
-/**
- * fira_session_get_round_slot() - Get current round's slot.
+ * fira_session_get_meas_seq_step() - Get current measurement step.
  * @session: Session.
  *
- * Return: The first slot of the current round.
+ * Return: Current Measurement Sequence step for given session.
  */
-static inline u32
-fira_session_get_round_slot(const struct fira_session *session)
+static inline const struct fira_measurement_sequence_step *
+fira_session_get_meas_seq_step(const struct fira_session *session)
 {
-	return session->round_index * session->params.round_duration_slots;
+	const struct fira_measurement_sequence *seq =
+		&session->measurements.sequence;
+
+	return &seq->steps[session->measurements.index];
 }
 
 /**
- * fira_session_get_round_sts_index() - Get current round's STS index.
+ * fira_session_get_rx_ant_set() - Get Rx antenna set for a given message ID.
  * @session: Session.
+ * @message_id: Message ID of FiRa frame.
  *
- * Return: The STS of the first slot of the current round.
- */
-static inline u32
-fira_session_get_round_sts_index(const struct fira_session *session)
-{
-	return session->sts_index + fira_session_get_round_slot(session);
-}
-
-/**
- * fira_session_get_block_duration_margin() - Get block duration margin.
- * @local: FiRa context.
- * @session: Session.
- *
- * Return: Block duration margin in dtu.
+ * Return: Adequate antenna set id for given frame and session parameters.
  */
 static inline int
-fira_session_get_block_duration_margin(struct fira_local *local,
-				       const struct fira_session *session)
+fira_session_get_rx_ant_set(const struct fira_session *session,
+			    enum fira_message_id message_id)
 {
-	return (long long int)session->params.block_duration_dtu *
-	       local->block_duration_rx_margin_ppm / 1000000;
+	const struct fira_session_params *params = &session->params;
+	const struct fira_measurement_sequence_step *step =
+		fira_session_get_meas_seq_step(session);
+
+	if (message_id > FIRA_MESSAGE_ID_RFRAME_MAX)
+		return step->rx_ant_set_nonranging;
+
+	/* TODO: replace this test by device_role == FIRA_DEVICE_ROLE_INITIATOR
+	* as soon as this feature is supported */
+	if (params->device_type == FIRA_DEVICE_TYPE_CONTROLLER)
+		return step->rx_ant_sets_ranging[0];
+	else
+		switch (step->type) {
+		case FIRA_MEASUREMENT_TYPE_RANGE:
+		case FIRA_MEASUREMENT_TYPE_AOA:
+		case FIRA_MEASUREMENT_TYPE_AOA_AZIMUTH:
+		case FIRA_MEASUREMENT_TYPE_AOA_ELEVATION:
+			return step->rx_ant_sets_ranging[0];
+		case FIRA_MEASUREMENT_TYPE_AOA_AZIMUTH_ELEVATION:
+			return step->rx_ant_sets_ranging
+				[message_id == FIRA_MESSAGE_ID_RANGING_FINAL];
+		default:
+			return -1;
+		}
+	return -1;
+}
+
+/**
+ * fira_session_report() - Report state change and ranging result for a session.
+ * @local: FiRa context.
+ * @session: Session to report.
+ * @report_info: report information to exploit for the reporting.
+ */
+void fira_session_report(struct fira_local *local, struct fira_session *session,
+			 const struct fira_report_info *report_info);
+
+/**
+ * fira_session_controlee_active() - Return whether the controlee is currently active.
+ * @controlee: Controlee.
+ *
+ * Return: True if the controlee is currently active.
+ */
+static inline bool
+fira_session_controlee_active(struct fira_controlee *controlee)
+{
+	switch (controlee->state) {
+	case FIRA_CONTROLEE_STATE_RUNNING:
+	case FIRA_CONTROLEE_STATE_PENDING_STOP:
+	case FIRA_CONTROLEE_STATE_PENDING_DEL:
+		return true;
+	default:
+		return false;
+	}
 }
 
 #endif /* NET_MCPS802154_FIRA_SESSION_H */

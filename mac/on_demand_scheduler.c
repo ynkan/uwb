@@ -35,12 +35,10 @@
 #include "on_demand_scheduler.h"
 #include "warn_return.h"
 
-#define REGIONS_ID_MAX 2
-
 /**
- * struct mcps802154_private_local - local context for on demand scheduler.
+ * struct mcps802154_on_demand_local - local context for on demand scheduler.
  */
-struct mcps802154_private_local {
+struct mcps802154_on_demand_local {
 	/**
 	 * @scheduler: Common scheduler context.
 	 */
@@ -50,131 +48,66 @@ struct mcps802154_private_local {
 	 */
 	struct mcps802154_llhw *llhw;
 	/**
-	 * @regions: Array of regions.
+	 * @idle_region: Idle region to delay start of region selected.
 	 */
-	struct mcps802154_region *regions[REGIONS_ID_MAX];
+	struct mcps802154_region *idle_region;
 };
 
-static inline struct mcps802154_private_local *
+static inline struct mcps802154_on_demand_local *
 scheduler_to_plocal(const struct mcps802154_scheduler *scheduler)
 {
-	return container_of(scheduler, struct mcps802154_private_local,
+	return container_of(scheduler, struct mcps802154_on_demand_local,
 			    scheduler);
 }
 
 static struct mcps802154_scheduler *
 mcps802154_on_demand_scheduler_open(struct mcps802154_llhw *llhw)
 {
-	struct mcps802154_private_local *plocal;
+	struct mcps802154_on_demand_local *plocal;
 
 	plocal = kmalloc(sizeof(*plocal), GFP_KERNEL);
 	if (!plocal)
-		return NULL;
+		goto open_failure;
+
+	plocal->idle_region = mcps802154_region_open(llhw, "idle", NULL, NULL);
+	if (!plocal->idle_region) {
+		goto open_failure;
+	}
+
 	plocal->llhw = llhw;
-	memset(plocal->regions, 0, sizeof(plocal->regions));
+	plocal->scheduler.n_regions = 0;
 	return &plocal->scheduler;
+
+open_failure:
+	kfree(plocal);
+	return NULL;
 }
 
 static void
 mcps802154_on_demand_scheduler_close(struct mcps802154_scheduler *scheduler)
 {
-	struct mcps802154_private_local *plocal =
+	struct mcps802154_on_demand_local *plocal =
 		scheduler_to_plocal(scheduler);
-	int i;
 
-	for (i = 0; i < REGIONS_ID_MAX; i++) {
-		struct mcps802154_region *region = plocal->regions[i];
-		if (region)
-			mcps802154_region_close(plocal->llhw, region);
-	}
-
+	kfree(plocal->idle_region);
 	kfree(plocal);
 }
 
-static void mcps802154_on_demand_scheduler_notify_stop(
-	struct mcps802154_scheduler *scheduler)
+static int mcps802154_on_demand_scheduler_get_next_region(
+	struct mcps802154_on_demand_local *plocal, struct list_head *regions,
+	const struct mcps802154_region *first_region, u32 next_timestamp_dtu,
+	struct mcps802154_region_demand *next_demand,
+	struct mcps802154_region **next_region)
 {
-	struct mcps802154_private_local *plocal =
-		scheduler_to_plocal(scheduler);
-	int i;
-
-	for (i = 0; i < REGIONS_ID_MAX; i++) {
-		struct mcps802154_region *region = plocal->regions[i];
-
-		if (!region)
-			continue;
-
-		mcps802154_region_notify_stop(plocal->llhw, region);
-	}
-}
-
-static int mcps802154_on_demand_scheduler_set_region_parameters(
-	struct mcps802154_scheduler *scheduler, u32 region_id,
-	const char *region_name, const struct nlattr *attrs,
-	struct netlink_ext_ack *extack)
-{
-	struct mcps802154_private_local *plocal =
-		scheduler_to_plocal(scheduler);
-
-	if (region_id >= REGIONS_ID_MAX)
-		return -ENOENT;
-
-	/* Close current region. */
-	if (plocal->regions[region_id])
-		mcps802154_region_close(plocal->llhw,
-					plocal->regions[region_id]);
-
-	/* Open region, and set its parameters. */
-	plocal->regions[region_id] = mcps802154_region_open(
-		plocal->llhw, region_name, attrs, extack);
-
-	if (!plocal->regions[region_id])
-		return -EINVAL;
-
-	return 0;
-}
-
-static int mcps802154_on_demand_scheduler_call_region(
-	struct mcps802154_scheduler *scheduler, u32 region_id,
-	const char *region_name, u32 call_id, const struct nlattr *attrs,
-	const struct genl_info *info)
-{
-	struct mcps802154_private_local *plocal =
-		scheduler_to_plocal(scheduler);
 	struct mcps802154_region *region;
-
-	if (region_id >= REGIONS_ID_MAX)
-		return -ENOENT;
-
-	region = plocal->regions[region_id];
-	if (!region)
-		return -ENOENT;
-
-	if (strcmp(region_name, region->ops->name))
-		return -EINVAL;
-
-	return mcps802154_region_call(plocal->llhw, region, call_id, attrs,
-				      info);
-}
-
-static int mcps802154_on_demand_scheduler_update_schedule(
-	struct mcps802154_scheduler *scheduler,
-	const struct mcps802154_schedule_update *schedule_update,
-	u32 next_timestamp_dtu)
-{
-	struct mcps802154_private_local *plocal =
-		scheduler_to_plocal(scheduler);
-	struct mcps802154_region_demand demand;
-	struct mcps802154_region *next_region = NULL;
 	int max_duration_dtu = 0;
-	u32 start_dtu;
-	int r, i;
+	int r;
 
-	for (i = 0; i < REGIONS_ID_MAX; i++) {
-		struct mcps802154_region *region = plocal->regions[i];
+	*next_region = NULL;
+	list_for_each_entry (region, regions, ca_entry) {
 		struct mcps802154_region_demand candidate = {};
 
-		if (!region)
+		if (first_region && region == first_region)
 			continue;
 
 		r = mcps802154_region_get_demand(
@@ -192,62 +125,60 @@ static int mcps802154_on_demand_scheduler_update_schedule(
 
 		/* Reduce duration of candidate region with less priority. */
 		if (max_duration_dtu &&
-		    (!candidate.duration_dtu ||
+		    (!candidate.max_duration_dtu ||
 		     is_before_dtu(next_timestamp_dtu + max_duration_dtu,
 				   candidate.timestamp_dtu +
-					   candidate.duration_dtu)))
-			candidate.duration_dtu = max_duration_dtu -
-						 candidate.timestamp_dtu +
-						 next_timestamp_dtu;
+					   candidate.max_duration_dtu)))
+			candidate.max_duration_dtu = max_duration_dtu -
+						     candidate.timestamp_dtu +
+						     next_timestamp_dtu;
 
 		/* Arbitrate between regions. */
-		if (!next_region || is_before_dtu(candidate.timestamp_dtu,
-						  demand.timestamp_dtu)) {
-			next_region = region;
-			demand = candidate;
+		if (!*next_region ||
+		    is_before_dtu(candidate.timestamp_dtu,
+				  next_demand->timestamp_dtu)) {
+			*next_region = region;
+			*next_demand = candidate;
 			/* Is there some time remaining for a region with
 			 * less priority? */
 			if (!is_before_dtu(next_timestamp_dtu,
-					   demand.timestamp_dtu))
+					   next_demand->timestamp_dtu))
 				break;
 			else
-				max_duration_dtu = demand.timestamp_dtu -
+				max_duration_dtu = next_demand->timestamp_dtu -
 						   next_timestamp_dtu;
 		}
 	}
 
-	/* FIXME:
-	 * - With duration_dtu = 0 (Infinite), the region interleaving is blocked.
-	 * - Without candidate, the CA will go in stop instead of idle.
-	 *   Which block the session start.
-	 *
-	 * Workaround:
-	 * Select the first region, and set the duration to idle time.
-	 * So the scheduler can be set, and the region start later.
-	 */
-	if (!next_region) {
-		for (i = 0; i < REGIONS_ID_MAX; i++) {
-			struct mcps802154_region *region = plocal->regions[i];
+	return *next_region ? 1 : 0;
+}
 
-			if (!region)
-				continue;
+static int mcps802154_on_demand_scheduler_update_schedule(
+	struct mcps802154_scheduler *scheduler,
+	const struct mcps802154_schedule_update *schedule_update,
+	u32 next_timestamp_dtu)
+{
+	struct mcps802154_on_demand_local *plocal =
+		scheduler_to_plocal(scheduler);
+	struct list_head *regions;
+	struct mcps802154_region_demand next_demand;
+	struct mcps802154_region *next_region = NULL;
+	u32 start_in_schedule_dtu;
+	int r;
 
-			next_region = region;
-			demand.timestamp_dtu = next_timestamp_dtu;
-			demand.duration_dtu = plocal->llhw->idle_dtu + 1;
-			break;
-		}
-	}
+	mcps802154_schedule_get_regions(plocal->llhw, &regions);
+	r = mcps802154_on_demand_scheduler_get_next_region(
+		plocal, regions, NULL, next_timestamp_dtu, &next_demand,
+		&next_region);
+	if (r < 0)
+		return r;
 
 	if (!next_region)
 		return -ENOENT;
 
-	start_dtu = demand.timestamp_dtu -
-		    schedule_update->expected_start_timestamp_dtu;
+	start_in_schedule_dtu = next_demand.timestamp_dtu - next_timestamp_dtu;
 
-	r = mcps802154_schedule_set_start(
-		schedule_update, schedule_update->expected_start_timestamp_dtu);
-	/* Can not fail, only possible error is invalid parameters. */
+	r = mcps802154_schedule_set_start(schedule_update, next_timestamp_dtu);
 	WARN_RETURN(r);
 
 	r = mcps802154_schedule_recycle(schedule_update, 0,
@@ -255,10 +186,79 @@ static int mcps802154_on_demand_scheduler_update_schedule(
 	/* Can not fail, only possible error is invalid parameters. */
 	WARN_RETURN(r);
 
+	if (next_demand.max_duration_dtu)
+		next_demand.max_duration_dtu += start_in_schedule_dtu;
+ 	start_in_schedule_dtu = 0;
+
+	if (start_in_schedule_dtu)
+		/* Don't give the access to the region too early.
+		 * And provide advantages:
+		 *  - to have a region inserted with a CA invalidate schedule.
+		 *  - Reduce latency with TX frame prepared close to region
+		 *    start date. */
+		r = mcps802154_schedule_add_region(schedule_update,
+						   plocal->idle_region, 0,
+						   start_in_schedule_dtu,
+						   false);
 	r = mcps802154_schedule_add_region(schedule_update, next_region,
-					   start_dtu, demand.duration_dtu);
+					   start_in_schedule_dtu,
+					   next_demand.max_duration_dtu, true);
 
 	return r;
+}
+
+static int mcps802154_on_demand_scheduler_get_next_demands(
+	struct mcps802154_scheduler *scheduler,
+	const struct mcps802154_region *region, u32 timestamp_dtu,
+	int duration_dtu, int delta_dtu,
+	struct mcps802154_region_demand *demands)
+{
+	struct mcps802154_on_demand_local *plocal =
+		scheduler_to_plocal(scheduler);
+	struct list_head *regions;
+	bool is_demands_set = false;
+	u32 next_timestamp_dtu = timestamp_dtu;
+	int r;
+
+	mcps802154_schedule_get_regions(plocal->llhw, &regions);
+
+	while (true) {
+		struct mcps802154_region_demand next_demand;
+		struct mcps802154_region *next_region = NULL;
+
+		r = mcps802154_on_demand_scheduler_get_next_region(
+			plocal, regions, region, next_timestamp_dtu,
+			&next_demand, &next_region);
+		if (r < 0)
+			return r;
+		if (!r || !next_demand.max_duration_dtu ||
+		    !is_before_dtu(next_demand.timestamp_dtu,
+				   timestamp_dtu + duration_dtu))
+			break;
+		if (!is_demands_set) {
+			*demands = next_demand;
+			is_demands_set = true;
+		} else if (!is_before_dtu(demands->timestamp_dtu +
+						  demands->max_duration_dtu +
+						  delta_dtu,
+					  next_demand.timestamp_dtu)) {
+			demands->max_duration_dtu =
+				next_demand.timestamp_dtu +
+				next_demand.max_duration_dtu -
+				demands->timestamp_dtu;
+		} else {
+			break;
+		}
+
+		if (!is_before_dtu(demands->timestamp_dtu +
+					   demands->max_duration_dtu,
+				   timestamp_dtu + duration_dtu))
+			break;
+
+		next_timestamp_dtu =
+			demands->timestamp_dtu + demands->max_duration_dtu;
+	}
+	return is_demands_set ? 1 : 0;
 }
 
 static struct mcps802154_scheduler_ops
@@ -267,13 +267,11 @@ static struct mcps802154_scheduler_ops
 		.name = "on_demand",
 		.open = mcps802154_on_demand_scheduler_open,
 		.close = mcps802154_on_demand_scheduler_close,
-		.notify_stop = mcps802154_on_demand_scheduler_notify_stop,
 		.set_parameters = NULL, /* No scheduler parameters for now. */
-		.set_region_parameters =
-			mcps802154_on_demand_scheduler_set_region_parameters,
-		.call_region = mcps802154_on_demand_scheduler_call_region,
 		.update_schedule =
 			mcps802154_on_demand_scheduler_update_schedule,
+		.get_next_demands =
+			mcps802154_on_demand_scheduler_get_next_demands,
 	};
 
 int __init mcps802154_on_demand_scheduler_init(void)
