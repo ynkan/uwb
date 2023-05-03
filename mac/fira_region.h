@@ -1,7 +1,7 @@
 /*
  * This file is part of the UWB stack for linux.
  *
- * Copyright (c) 2020-2021 Qorvo US, Inc.
+ * Copyright (c) 2020-2022 Qorvo US, Inc.
  *
  * This software is provided under the GNU General Public License, version 2
  * (GPLv2), as well as under a Qorvo commercial license.
@@ -25,9 +25,10 @@
 #define NET_FIRA_REGION_H
 
 #include <linux/kernel.h>
+#include <linux/workqueue.h>
 #include <net/mcps802154_schedule.h>
 
-#include "fira_region_params.h"
+#include "net/fira_region_params.h"
 
 #define FIRA_SLOT_DURATION_RSTU_DEFAULT 2400
 #define FIRA_BLOCK_DURATION_MS_DEFAULT 200
@@ -38,6 +39,7 @@
 #define FIRA_IN_BAND_TERMINATION_ATTEMPT_COUNT_MAX 10
 #define FIRA_IN_BAND_TERMINATION_ATTEMPT_COUNT_MIN 1
 #define FIRA_BOOLEAN_MAX 1
+#define FIRA_BLOCK_STRIDE_LEN_MAX 255
 #define FIRA_FRAMES_MAX (3 + 3 * FIRA_CONTROLEES_MAX)
 #define FIRA_CONTROLEE_FRAMES_MAX (3 + 3 + 1)
 /* IEEE 802.15.4z 2020 section 6.9.7.2 */
@@ -72,6 +74,41 @@ enum fira_message_id {
 };
 
 /**
+ * struct fira_diagnostic - Diagnostic result.
+ */
+struct fira_diagnostic {
+	/**
+	 * @rssis_q1: Received signal strength indication (RSSI), absolute value
+	 * in Q1 fixed point format, unit is dBm.
+	 */
+	u8 rssis_q1[MCPS802154_RSSIS_N_MAX];
+	/**
+	 * @n_rssis: The number of RSSI in the array below.
+	 */
+	size_t n_rssis;
+	/**
+	 * @aoas: Angle of arrival, ordered by increasing measurement type.
+	 */
+	struct mcps802154_rx_aoa_measurements
+		aoas[MCPS802154_RX_AOA_MEASUREMENTS_MAX];
+	/**
+	 * @n_aoas: Number of angle of arrival.
+	 */
+	size_t n_aoas;
+	/**
+	 * @cirs: CIR for different parts of the frame.
+	 *
+	 * Set by low-level driver, must be kept valid until next received
+	 * frame.
+	 */
+	struct mcps802154_rx_cir *cirs;
+	/**
+	 * @n_cirs: Number of parts of CIR.
+	 */
+	size_t n_cirs;
+};
+
+/**
  * struct fira_slot - Information on an active slot.
  */
 struct fira_slot {
@@ -82,10 +119,9 @@ struct fira_slot {
 	 */
 	int index;
 	/**
-	 * @tx_controlee_index: Index of the controlee transmitting in this
-	 * slot, or -1 for the controller.
+	 * @controller_tx: True if Tx is performed by the controller.
 	 */
-	int tx_controlee_index;
+	bool controller_tx;
 	/**
 	 * @ranging_index: Index of the ranging in the ranging information
 	 * table, -1 if none.
@@ -96,17 +132,21 @@ struct fira_slot {
 	 */
 	enum fira_message_id message_id;
 	/**
-	 * @tx_ant: Tx antenna selection.
+	 * @tx_ant_set: Tx antenna set.
 	 */
-	int tx_ant;
+	int tx_ant_set;
 	/**
-	 * @rx_ant_pair: Rx antenna selection.
+	 * @rx_ant_set: Rx antenna set.
 	 */
-	int rx_ant_pair;
+	int rx_ant_set;
+	/**
+	 * @controlee: Controlee.
+	 */
+	struct fira_controlee *controlee;
 };
 
 /**
- * struct fira_aoa_info - Ranging AoA information.
+ * struct fira_local_aoa_info - Ranging AoA information.
  */
 struct fira_local_aoa_info {
 	/**
@@ -122,9 +162,9 @@ struct fira_local_aoa_info {
 	 */
 	u8 aoa_fom;
 	/**
-	 * @rx_ant_pair: Antenna pair index.
+	 * @rx_ant_set: Antenna set index.
 	 */
-	u8 rx_ant_pair;
+	u8 rx_ant_set;
 	/**
 	 * @present: true if AoA information is present.
 	 */
@@ -144,8 +184,8 @@ struct fira_ranging_info {
 	 */
 	int tof_rctu;
 	/**
-	 * @local_aoa: Local ranging AoA information.
-	 */
+	* @local_aoa: Local ranging AoA information.
+	*/
 	struct fira_local_aoa_info local_aoa;
 	/**
 	 * @local_aoa_azimuth: Azimuth ranging AoA information.
@@ -171,6 +211,14 @@ struct fira_ranging_info {
 	 * @remote_aoa_elevation_fom: Remote elevation FoM.
 	 */
 	u8 remote_aoa_elevation_fom;
+	/**
+	 * @rx_rssis: RSSI value measured for individual Rx frames.
+	 */
+	u8 rx_rssis[FIRA_MESSAGE_ID_MAX + 1];
+	/**
+	 * @n_rx_rssis: Number of Rx RSSI saved.
+	 */
+	int n_rx_rssis;
 	/**
 	 * @short_addr: Peer short address.
 	 */
@@ -200,6 +248,14 @@ struct fira_ranging_info {
 	 */
 	bool remote_aoa_fom_present;
 	/**
+	 * @clock_offset_present: true if the driver provided clock_offset info.
+	 */
+	bool clock_offset_present;
+	/**
+	 * @clock_offset_q26: clock offset value, as signed Q26, if present.
+	 */
+	s16 clock_offset_q26;
+	/**
 	 * @data_payload: Custom data payload.
 	 */
 	u8 data_payload[FIRA_DATA_PAYLOAD_SIZE_MAX];
@@ -207,6 +263,10 @@ struct fira_ranging_info {
 	 * @data_payload_len: Custom data payload length.
 	 */
 	int data_payload_len;
+	/**
+	 * @rx_ctx: Pointer to the current rx_ctx context controlee.
+	 */
+	void *rx_ctx;
 };
 
 /**
@@ -226,6 +286,14 @@ struct fira_local {
 	 */
 	struct mcps802154_access access;
 	/**
+	 * @report_queue: Queue of report frame to be processed.
+	 */
+	struct sk_buff_head report_queue;
+	/**
+	 * @report_work: Process work of report event.
+	 */
+	struct work_struct report_work;
+	/**
 	 * @frames: Access frames referenced from access.
 	 */
 	struct mcps802154_access_frame frames[FIRA_FRAMES_MAX];
@@ -238,9 +306,34 @@ struct fira_local {
 	 */
 	struct mcps802154_channel channel;
 	/**
+	 * @inactive_sessions: List of inactive sessions.
+	 */
+	struct list_head inactive_sessions;
+	/**
+	 * @active_sessions: List of active sessions.
+	 */
+	struct list_head active_sessions;
+	/**
 	 * @current_session: Pointer to the current session.
 	 */
 	struct fira_session *current_session;
+	/**
+	 * @src_short_addr: Source address for the current session (actually
+	 * never put as a source address in a frame, but used for control
+	 * message).
+	 */
+	__le16 src_short_addr;
+	/**
+	 * @dst_short_addr: Destination address for the current session. When
+	 * controller, this is broadcast or the address of the only controlee.
+	 * When controlee, this is the address of the controller.
+	 */
+	__le16 dst_short_addr;
+	/**
+	 * @block_duration_rx_margin_ppm: Block duration rx margin for
+	 * controlees.
+	 */
+	int block_duration_rx_margin_ppm;
 	/**
 	 * @slots: Descriptions of each active slots for the current session.
 	 * When controller, this is filled when the access is requested. When
@@ -266,41 +359,19 @@ struct fira_local {
 	 */
 	int n_ranging_valid;
 	/**
-	 * @src_short_addr: Source address for the current session (actually
-	 * never put as a source address in a frame, but used for control
-	 * message).
+	 * @diagnostics: Diagnostic collected for each slot.
 	 */
-	__le16 src_short_addr;
+	struct fira_diagnostic diagnostics[FIRA_FRAMES_MAX];
 	/**
-	 * @dst_short_addr: Destination address for the current session. When
-	 * controller, this is broadcast or the address of the only controlee.
-	 * When controlee, this is the address of the controller.
+	 * @stopped_controlees: Short addresses of the stopped controlees for
+	 * which an element must be added to the Device Management List of
+	 * the control message.
 	 */
-	__le16 dst_short_addr;
+	__le16 stopped_controlees[FIRA_CONTROLEES_MAX];
 	/**
-	 * @inactive_sessions: List of inactive sessions.
+	 * @n_stopped_controlees: Number of elements in the stopped controlees .
 	 */
-	struct list_head inactive_sessions;
-	/**
-	 * @active_sessions: List of active sessions.
-	 */
-	struct list_head active_sessions;
-	/**
-	 * @stopped_controlees_short_addr: Short addresses of the stopped
-	 * controlees for which an element must be added to the Device
-	 * Management List of the RCM message.
-	 */
-	__le16 stopped_controlees_short_addr[FIRA_CONTROLEES_MAX];
-	/**
-	 * @n_stopped_controlees_short_addr: Number of elements in the stopped
-	 * controlees short addr table.
-	 */
-	int n_stopped_controlees_short_addr;
-	/**
-	 * @block_duration_rx_margin_ppm: Block duration rx margin for
-	 * controlees.
-	 */
-	int block_duration_rx_margin_ppm;
+	int n_stopped_controlees;
 };
 
 static inline struct fira_local *
@@ -316,20 +387,24 @@ access_to_local(struct mcps802154_access *access)
 }
 
 /**
- * fira_report() - Report state change or ranging result for a session.
+ * fira_get_session_by_session_id() - Get a session by its identifier.
  * @local: FiRa context.
- * @session: Session to report. Report ranging result if current session.
- * @add_measurements: True to add measurements to report.
+ * @session_id: Session identifier.
+ *
+ * Return: The session or NULL if not found.
  */
-void fira_report(struct fira_local *local, struct fira_session *session,
-		 bool add_measurements);
+struct fira_session *fira_get_session_by_session_id(struct fira_local *local,
+						    u32 session_id);
 
 /**
- * fira_session_notify_state_change() - Notify session state change to upper layers.
+ * fira_check_all_missed_ranging() - Check missed ranging round for all active
+ * session except the recent.
  * @local: FiRa context.
- * @session_id: Fira session id.
- * @state: Fira session state.
+ * @recent_session: FiRa session to not check in active list.
+ * @timestamp_dtu: Timestamp used to trig (or not) a report of ranging failure.
  */
-void fira_session_notify_state_change(struct fira_local *local, u32 session_id, uint8_t state);
+void fira_check_all_missed_ranging(struct fira_local *local,
+				   const struct fira_session *recent_session,
+				   u32 timestamp_dtu);
 
 #endif /* NET_FIRA_REGION_H */

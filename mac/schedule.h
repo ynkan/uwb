@@ -45,6 +45,10 @@ struct mcps802154_schedule_region {
 	 * @duration_dtu: Region duration or 0 for endless region.
 	 */
 	int duration_dtu;
+	/**
+	 * @once: Schedule the region once, ignoring the remaining region duration.
+	 */
+	bool once;
 };
 
 /**
@@ -110,7 +114,7 @@ void mcps802154_schedule_clear(struct mcps802154_local *local);
  *
  * Request the scheduler to update the schedule.
  *
- * Return: 0 or error.
+ * Return: 1 or error.
  */
 int mcps802154_schedule_update(struct mcps802154_local *local,
 			       u32 next_timestamp_dtu);
