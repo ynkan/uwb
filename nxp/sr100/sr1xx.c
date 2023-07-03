@@ -195,6 +195,7 @@ static long sr1xx_dev_ioctl(struct file *filp, unsigned int cmd,
 		} else if (arg == PWR_DISABLE) {
 			ret = sr1xx_power_ctl(sr1xx_dev, false);
 		} else if (arg == ABORT_READ_PENDING) {
+			dev_info(&sr1xx_dev->spi->dev, "Abort read requested\n");
 			atomic_set(&sr1xx_dev->read_abort_requested, 1);
 			/* Wake up waiting readers */
 			wake_up(&sr1xx_dev->read_wq);
@@ -247,7 +248,9 @@ static int sr1xx_wait_irq(struct sr1xx_dev* sr1xx_dev, long timeout)
 		else if (ret == 0)
 			ret = -ETIMEDOUT;
 	} else {
-		ret = wait_event_interruptible(sr1xx_dev->read_wq, atomic_read(&sr1xx_dev->irq_received));
+		ret = wait_event_interruptible(sr1xx_dev->read_wq,
+				atomic_read(&sr1xx_dev->irq_received) ||
+				atomic_read(&sr1xx_dev->read_abort_requested));
 	}
 
 	if (!ret)
