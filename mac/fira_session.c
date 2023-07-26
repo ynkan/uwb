@@ -905,6 +905,7 @@ bool fira_session_is_ready(const struct fira_local *local,
 	case FIRA_RANGE_DATA_NTF_PROXIMITY_AND_AOA_CROSSING:
 		if (check_parameter_proximity_range(&session->params))
 			return false;
+		fallthrough;
 	default:
 		break;
 	}
@@ -917,6 +918,7 @@ bool fira_session_is_ready(const struct fira_local *local,
 			return false;
 		if (check_parameter_bound_aoa_elevation(&session->params))
 			return false;
+		fallthrough;
 	default:
 		break;
 	}
