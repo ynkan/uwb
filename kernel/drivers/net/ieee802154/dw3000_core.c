@@ -187,8 +187,8 @@ const struct dw3000_chip_version dw3000_chip_versions[] = {
 #define DW3000_TXRXSWITCH_TX 0x01011100
 #define DW3000_TXRXSWITCH_AUTO 0x1C000000
 
-#define DW3000_RF_TXCTRL_CH5 0x1C071134UL
-#define DW3000_RF_TXCTRL_CH9 0x1C010034UL
+#define DW3000_RF_TXCTRL_CH5 0x1C081134UL
+#define DW3000_RF_TXCTRL_CH9 0x1C020034UL
 #define DW3000_RF_TXCTRL_LO_B2 0x0E
 #define DW3000_RF_PLL_CFG_CH5 0x1F3C
 #define DW3000_RF_PLL_CFG_CH9 0x0F3C
@@ -296,6 +296,14 @@ enum ciadiag_dbl_options {
 
 /* Disable CIA diagnostic. CIACONFIG's bit-4 in RX_ANTENNA_DELAY + 1 */
 #define DW3000_CIA_CONFIG_DIAG_OFF (0x1 << 4)
+
+/* LDO VOUT value */
+#define DW3000_RF_LDO_VOUT 0x0D7FFFFFUL
+/* RF SWITCH RX RF2 */
+#define DW3000_RF_SWITCH_RX_RF2 0x2131
+
+/* PLL common value  */
+#define DW3000_RF_PLL_COMMON 0xE104
 
 struct dw3000_ciadiag_reg_info {
 	u32 diag1;
@@ -1379,14 +1387,45 @@ int dw3000_clear_spi_collision_status(struct dw3000 *dw, u8 clear_bits)
 	return rc;
 }
 
-
-int dw3000_change_tx_rf1_to_rf2(struct dw3000 *dw, bool tx)
+/**
+ * dw3000_change_tx_rf_port() - Enable TX on RF2 port.
+ * @dw: the DW device on which the SPI transfer will occurs
+ * @use_rf2: variable to trigger the SWITCH to RF2
+ *
+ * Return: 0 on success, else a negative error code.
+ */
+static int dw3000_change_tx_rf_port(struct dw3000 *dw, bool use_rf2)
 {
 	int rc;
-	if (tx)
-		rc = dw3000_reg_write32(dw, DW3000_RF_SWITCH_CTRL_ID, 0, 0x1C000050);
-	else
-		rc = dw3000_reg_write32(dw, DW3000_RF_SWITCH_CTRL_ID, 0, 0x1C000000);
+	u32 val = DW3000_TXRXSWITCH_AUTO |
+		  ((u32)use_rf2
+		   << DW3000_RF_SWITCH_CTRL_ANT_TXRX_TXPORT_BIT_OFFSET) |
+		  ((u32)use_rf2
+		   << DW3000_RF_SWITCH_CTRL_ANT_TXRX_MODE_OVR_BIT_OFFSET);
+	rc = dw3000_reg_write32(dw, DW3000_RF_SWITCH_CTRL_ID, 0, val);
+	if (!rc)
+		dw->tx_rf2 = use_rf2;
+	return rc;
+}
+
+/**
+ * dw3000_change_rx_rf_port() - Enable RX on RF2 port.
+ * @dw: the DW device on which the SPI transfer will occurs
+ * @use_rf2: variable to trigger the SWITCH to RF2
+ *
+ * Return: 0 on success, else a negative error code.
+ */
+static int dw3000_change_rx_rf_port(struct dw3000 *dw, bool use_rf2)
+{
+	int rc = 0;
+	u32 val = DW3000_TXRXSWITCH_AUTO |
+		  ((u32)use_rf2
+		   << DW3000_RF_SWITCH_CTRL_ANT_TXRX_RXPORT_BIT_OFFSET) |
+		  ((u32)use_rf2
+		   << DW3000_RF_SWITCH_CTRL_ANT_TXRX_MODE_OVR_BIT_OFFSET);
+	rc = dw3000_reg_write32(dw, DW3000_RF_SWITCH_CTRL_ID, 0, val);
+	if (!rc)
+		dw->rx_rf2 = use_rf2;
 	return rc;
 }
 
@@ -1794,6 +1833,12 @@ static int dw3000_power_supply(struct dw3000 *dw, int onoff)
 	if (rc < 0) {
 		dev_err(dw->dev, "regulator %s failed for 2p5 (%d)\n",
 			onoff ? "enable" : "disable", rc);
+		return rc;
+	}
+	/* Set 2p5 reg to 2.7V  */
+	rc = regulator_set_voltage(power->regulator_2p5, 2700000, 2700000);
+	if (rc < 0) {
+		dev_err(dw->dev, "regulator failed to set voltage :%d\n", rc);
 		return rc;
 	}
 
@@ -2629,7 +2674,7 @@ int dw3000_do_rx_enable(struct dw3000 *dw,
 	if (unlikely(rc))
 		goto fail;
 	/* Ensure correct RX antennas are selected. */
-	rc = dw3000_set_rx_antennas(dw, config->ant_set_id, pdoa_enabled);
+	rc = dw3000_set_rx_antennas(dw, config->ant_set_id, pdoa_enabled, frame_idx);
 	if (unlikely(rc))
 		goto fail;
 	if (config->flags & MCPS802154_RX_FRAME_CONFIG_AACK) {
@@ -4253,6 +4298,11 @@ static inline int dw3000_configure_rf(struct dw3000 *dw)
 	rc = dw3000_reg_write16(dw, DW3000_PLL_CFG_ID, 0, rf_pll_cfg);
 	if (rc)
 		return rc;
+
+	rc = dw3000_reg_write16(dw, DW3000_PLL_COMMON_ID, 0, DW3000_RF_PLL_COMMON);
+	if (rc)
+		return rc;
+
 	rc = dw3000_reg_write8(dw, DW3000_LDO_RLOAD_ID, 1,
 			       DW3000_LDO_RLOAD_VAL_B1);
 	if (rc)
@@ -4390,6 +4440,8 @@ int dw3000_configure_chan(struct dw3000 *dw)
 	rc = dw3000_configure_rf(dw);
 	if (rc)
 		return rc;
+	/* Disable AGC */
+	dw3000_reg_modify32(dw, DW3000_AGC_CFG_ID, 0, DW3000_AGC_DIS_MASK, 0);
 	/* Configure DGC. */
 	return dw3000_configure_dgc(dw);
 }
@@ -4556,6 +4608,13 @@ static int dw3000_setdwstate(struct dw3000 *dw, enum operational_state state)
 		 * - enable configuration copy from AON memory to host registers.
 		 * - set ONW_GO2IDLE to get DW3000_OP_STATE_IDLE_PLL on wakeup.
 		 */
+		/* Step 1.1
+		 * - clear DW3000_RUNSAR bit from DW3000_AON_DIG_CFG_ID
+		 * - turn off auto PGF cal on wake up
+		 */
+		dw->data.sleep_mode &= ~DW3000_RUNSAR;
+		dw->data.sleep_mode |= DW3000_PGFCAL;
+
 		rc = dw3000_reg_write16(
 			dw, DW3000_AON_DIG_CFG_ID, 0,
 			dw->data.sleep_mode |
@@ -5213,6 +5272,8 @@ static int dw3000_configure(struct dw3000 *dw)
 
 	/* Update configuration dependent timings */
 	dw3000_update_timings(dw);
+	/* update VOUT */
+	rc = dw3000_reg_write32(dw, DW3000_LDO_VOUT_ID, 0, DW3000_RF_LDO_VOUT);
 	return rc;
 }
 
@@ -6417,23 +6478,22 @@ int dw3000_set_tx_antenna(struct dw3000 *dw, int ant_set_id)
 			 ant_set_id);
 		return -EINVAL;
 	}
-	/* Early return if no change */
-	if (ant_idx1 == config->ant[0])
-		return 0;
 	/* Retrieve antenna GPIO configuration from calibration data */
 	ant_calib = &dw->calib_data.ant[ant_idx1];
+	/* Early return if no change */
+	if (ant_idx1 == config->ant[ant_calib->port])
+		return 0;
+
 	/* switching to RF2 port for TX if necessary  */
-	if (ant_calib->port == 1) {
-		dw3000_change_tx_rf1_to_rf2(dw, true);
-		dw->tx_rf2 = 1;
-	}
+	if ((ant_calib->port == 1) || (dw->tx_rf2))
+		dw3000_change_tx_rf_port(dw, ant_calib->port == 1);
 
 	/* Set GPIO state according config to select this antenna */
 	rc = dw3000_set_antenna_gpio(dw, ant_calib);
 
 	if (rc)
 		return rc;
-	config->ant[0] = ant_idx1;
+	config->ant[ant_calib->port] = ant_idx1;
 	/* Switching antenna require changing some calibration parameters */
 	return dw3000_calib_update_config(dw);
 }
@@ -6443,10 +6503,11 @@ int dw3000_set_tx_antenna(struct dw3000 *dw, int ant_set_id)
  * @dw: The DW device.
  * @ant_set_id: The antennas set id to use
  * @pdoa_enabled: True if PDoA is enabled
+ * @frame_idx: the id of the frame to be rcvd
  *
  * Return: zero on success, else a negative error code.
  */
-int dw3000_set_rx_antennas(struct dw3000 *dw, int ant_set_id, bool pdoa_enabled)
+int dw3000_set_rx_antennas(struct dw3000 *dw, int ant_set_id, bool pdoa_enabled, int frame_idx)
 {
 	struct dw3000_config *config = &dw->config;
 	struct dw3000_antenna_calib *ant_calib;
@@ -6455,9 +6516,6 @@ int dw3000_set_rx_antennas(struct dw3000 *dw, int ant_set_id, bool pdoa_enabled)
 	/* Sanity checks first */
 	if (ant_set_id < 0 || ant_set_id >= ANTSET_ID_MAX)
 		return -EINVAL;
-	if (dw->tx_rf2) {
-		dw3000_change_tx_rf1_to_rf2(dw, false);
-	}
 	/* Retrieve RX antennas configuration from antenna set id */
 	dw3000_calib_ant_set_id_to_ant(ant_set_id, &ant_idx1, &ant_idx2);
 	if (pdoa_enabled && (ant_idx1 < 0 || ant_idx2 < 0)) {
@@ -6470,6 +6528,11 @@ int dw3000_set_rx_antennas(struct dw3000 *dw, int ant_set_id, bool pdoa_enabled)
 	if (ant_idx1 >= 0) {
 		ant_calib = &dw->calib_data.ant[ant_idx1];
 		port = ant_calib->port; /* Save port for later check */
+		if  (((ant_calib->port == 1) || dw->rx_rf2) && ant_idx2 < 0) {
+			dw3000_change_rx_rf_port(dw, true);
+		} else {
+			dw3000_change_rx_rf_port(dw, false);
+		}
 		if (ant_idx1 != config->ant[port]) {
 			/* Set GPIO state according config for this first antenna */
 			rc = dw3000_set_antenna_gpio(dw, ant_calib);
@@ -7453,6 +7516,9 @@ static inline int dw3000_isr_handle_spi_ready(struct dw3000 *dw,
 
 	/* TODO: So, just add below this line more required unsaved registers
 	 * setup. */
+	 rc = dw3000_reg_write32(dw, DW3000_LDO_VOUT_ID, 0, DW3000_RF_LDO_VOUT);
+	 if (rc)
+		 return rc;
 
 setuperror:
 #ifdef CONFIG_DW3000_DEBUG
