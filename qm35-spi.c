@@ -26,7 +26,6 @@
  * QM35 UCI over HSSPI protocol
  */
 
-#include <linux/version.h>
 #include <linux/bitfield.h>
 #include <linux/interrupt.h>
 #include <linux/ioctl.h>
@@ -50,10 +49,7 @@
 #include <qmrom_log.h>
 #include <spi_rom_protocol.h>
 
-#include <fwupdater.h>
-
 #include "qm35.h"
-#include "qm35-sscd.h"
 #include "uci_ioctls.h"
 #include "hsspi.h"
 #include "hsspi_uci.h"
@@ -61,12 +57,6 @@
 
 #define QM35_REGULATOR_DELAY_US 1000
 #define QMROM_RETRIES 10
-
-#ifndef CONFIG_FLASHING_RETRIES
-#define CONFIG_FLASHING_RETRIES 10 /* Intentionally high value */
-#endif
-
-/* Redefine certificate error here since original definitions are separate */
 #define REGULATORS_ENABLED(x) (x->vdd1 || x->vdd2 || x->vdd3 || x->vdd4)
 
 #ifndef NO_UWB_HAL
@@ -88,8 +78,8 @@ static bool flash_on_probe = false;
 module_param(flash_on_probe, bool, 0444);
 MODULE_PARM_DESC(flash_on_probe, "Flash during the module probe");
 
-int spi_speed_hz;
-module_param(spi_speed_hz, int, 0644);
+static int spi_speed_hz;
+module_param(spi_speed_hz, int, 0444);
 MODULE_PARM_DESC(spi_speed_hz, "SPI speed (if not set use DTS's one)");
 
 static char *fwname = NULL;
@@ -97,11 +87,11 @@ module_param(fwname, charp, 0444);
 MODULE_PARM_DESC(fwname, "Use fwname as firmware binary to flash QM35");
 
 static bool wake_use_wakeup = true;
-module_param(wake_use_wakeup, bool, 0644);
+module_param(wake_use_wakeup, bool, 0444);
 MODULE_PARM_DESC(wake_use_wakeup, "Use wakeup pin to wake up QM35");
 
 static bool wake_use_csn = false;
-module_param(wake_use_csn, bool, 0644);
+module_param(wake_use_csn, bool, 0444);
 MODULE_PARM_DESC(wake_use_csn, "Use HSSPI CSn pin to wake up QM35");
 
 static bool wake_on_ssirq = true;
@@ -110,34 +100,22 @@ MODULE_PARM_DESC(wake_on_ssirq,
 		 "Allow QM35 to wakeup the platform using ss_irq");
 
 int trace_spi_xfers;
-module_param(trace_spi_xfers, int, 0644);
+module_param(trace_spi_xfers, int, 0444);
 MODULE_PARM_DESC(trace_spi_xfers, "Trace all the SPI transfers");
 
 int qmrom_retries = QMROM_RETRIES;
-module_param(qmrom_retries, int, 0644);
+module_param(qmrom_retries, int, 0444);
 MODULE_PARM_DESC(qmrom_retries, "QMROM retries");
 
-int flashing_retries = CONFIG_FLASHING_RETRIES;
-module_param(flashing_retries, int, 0644);
-MODULE_PARM_DESC(flashing_retries, "Flashing retries");
-
 int reset_on_error = 1;
-module_param(reset_on_error, int, 0644);
+module_param(reset_on_error, int, 0444);
 MODULE_PARM_DESC(reset_on_error, "Reset the QM35 on successive errors");
 
 int log_qm_traces = 1;
 module_param(log_qm_traces, int, 0444);
 MODULE_PARM_DESC(log_qm_traces, "Logs the QM35 traces in the kernel messages");
 
-int fu_spi_speed_hz;
-module_param(fu_spi_speed_hz, int, 0644);
-MODULE_PARM_DESC(fu_spi_speed_hz, "FW updater SPI speed");
-
-int qmrom_spi_speed_hz;
-module_param(qmrom_spi_speed_hz, int, 0644);
-MODULE_PARM_DESC(qmrom_spi_speed_hz, "FW updater SPI speed");
-
-static uint8_t qm_soc_id[QM357XX_ROM_SOC_ID_LEN];
+static uint8_t qm_soc_id[ROM_SOC_ID_LEN];
 static uint16_t qm_dev_id;
 
 /*
@@ -224,7 +202,6 @@ static long uci_ioctl(struct file *filp, unsigned int cmd, unsigned long args)
 		 * expected
 		 */
 		qm35_reset(qm35_hdl, QM_RESET_LOW_MS, on);
-
 		msleep(QM_BOOT_MS);
 
 		/* If reset or power on */
@@ -286,9 +263,6 @@ static ssize_t uci_write(struct file *filp, const char __user *buf, size_t len,
 	struct uci_packet *p;
 	DECLARE_COMPLETION_ONSTACK(comp);
 	int ret;
-
-	if (len > U16_MAX)
-		return -ENOMEM;
 
 	p = uci_packet_alloc(len);
 	if (!p)
@@ -383,13 +357,8 @@ static irqreturn_t qm35_ss_rdy_handler(int irq, void *data)
 	if (wake_use_wakeup)
 		gpiod_set_value(qm35_hdl->gpio_wakeup, 0);
 
-	if (!qm35_hdl->flashing) {
-		hsspi_clear_spi_slave_busy(&qm35_hdl->hsspi);
-		hsspi_set_spi_slave_ready(&qm35_hdl->hsspi);
-	} else {
-		qm35_hdl->qmrom_qm_ready = true;
-		wake_up_interruptible(&qm35_hdl->qmrom_wq_ready);
-	}
+	hsspi_clear_spi_slave_busy(&qm35_hdl->hsspi);
+	hsspi_set_spi_slave_ready(&qm35_hdl->hsspi);
 
 	return IRQ_HANDLED;
 }
@@ -429,40 +398,50 @@ static irqreturn_t qm35_exton_handler(int irq, void *data)
 
 void qm35_hsspi_start(struct qm35_ctx *qm35_hdl)
 {
+	int irq;
+
 	/* nothing to do as HSSPI is already started */
 	if (qm35_hdl->hsspi.state == HSSPI_RUNNING)
 		return;
 
-	enable_irq(qm35_hdl->ss_rdy_irq);
+	irq = gpiod_to_irq(qm35_hdl->gpio_ss_rdy);
+	if (irq >= 0) {
+		enable_irq(irq);
 #ifdef CONFIG_QM35_RISING_IRQ_NOT_TRIGGERED
-	/* Some IRQ controller will trigger a rising edge if
-	 * the gpio is high when enabling the IRQ, some will
-	 * not (RPI board for example). In the second case we
-	 * can miss an event depending on if the level rise
-	 * before or after enable_irq. Besides, the handler
-	 * can also run *after* hsspi_start, breaking the
-	 * hsspi thread with a false information. So let's
-	 * sleep and force the SS_READY bit after.
-	 */
+		/* Some IRQ controller will trigger a rising edge if
+		 * the gpio is high when enabling the IRQ, some will
+		 * not (RPI board for example). In the second case we
+		 * can miss an event depending on if the level rise
+		 * before or after enable_irq. Besides, the handler
+		 * can also run *after* hsspi_start, breaking the
+		 * hsspi thread with a false information. So let's
+		 * sleep and force the SS_READY bit after.
+		 */
 
-	if (gpiod_get_value(qm35_hdl->gpio_ss_rdy))
-		hsspi_set_spi_slave_ready(&qm35_hdl->hsspi);
+		if (gpiod_get_value(qm35_hdl->gpio_ss_rdy))
+			hsspi_set_spi_slave_ready(&qm35_hdl->hsspi);
 #endif
+	}
 
 	hsspi_start(&qm35_hdl->hsspi);
 }
 
 void qm35_hsspi_stop(struct qm35_ctx *qm35_hdl)
 {
+	int irq;
+
 	/* nothing to do as HSSPI is already stopped */
 	if (qm35_hdl->hsspi.state == HSSPI_STOPPED)
 		return;
 
 	hsspi_stop(&qm35_hdl->hsspi);
 
-	disable_irq_nosync(qm35_hdl->ss_rdy_irq);
+	irq = gpiod_to_irq(qm35_hdl->gpio_ss_rdy);
+	if (irq >= 0) {
+		disable_irq_nosync(irq);
 
-	clear_bit(HSSPI_FLAGS_SS_READY, qm35_hdl->hsspi.flags);
+		clear_bit(HSSPI_FLAGS_SS_READY, qm35_hdl->hsspi.flags);
+	}
 }
 
 int qm35_reset_sync(struct qm35_ctx *qm35_hdl)
@@ -477,135 +456,25 @@ int qm35_reset_sync(struct qm35_ctx *qm35_hdl)
 	return ret;
 }
 
-static int qm_firmware_flash_fw(struct qm35_ctx *qm35_hdl,
-				struct qmrom_handle *h,
-				const struct firmware *fw)
-{
-	int rc = 0, nb_retries = flashing_retries;
-	do {
-		/* If the previous flashing failed, re-enter the QM
-		 * rom code so it will be in the same initial state
-		 */
-		if (rc)
-			qmrom_reboot_bootloader(h);
-
-		rc = qm357xx_rom_flash_fw(h, fw);
-		if (rc)
-			dev_err(&qm35_hdl->spi->dev,
-				"Attempt %d: ROM flashing failed with %d!\n",
-				flashing_retries - nb_retries, rc);
-		if (rc == PEG_ERR_FIRST_KEY_CERT_OR_FW_VER)
-			break;
-	} while (rc && --nb_retries > 0);
-	return rc;
-}
-
-static int qm_firmware_flash_macro_pkg(struct qm35_ctx *qm35_hdl,
-				       struct qmrom_handle *h,
-				       const struct firmware *fw)
-{
-	int rc, nb_retries = flashing_retries;
-	const uint8_t *fw_data;
-	uint32_t fw_size;
-
-	rc = qm357xx_rom_fw_macro_pkg_get_fw_idx(fw, 1, &fw_size, &fw_data);
-	if (rc) {
-		dev_err(&qm35_hdl->spi->dev,
-			"FW MACRO PACKAGE corrupted = %d\n", rc);
-		return rc;
-	}
-	if (*(uint32_t *)fw_data != CRYPTO_FIRMWARE_PACK_MAGIC_VALUE) {
-		rc = -EINVAL;
-		dev_err(&qm35_hdl->spi->dev,
-			"FW PACKAGE not found - magic is %04x, size is %d\n",
-			*(uint32_t *)fw_data, fw_size);
-		return rc;
-	}
-
-	do {
-		/* If the previous flashing failed, re-enter the QM
-		 * rom code so it will be in the same initial state
-		 */
-		if (spi_speed_hz)
-			qmrom_spi_set_freq(spi_speed_hz);
-		else
-			qmrom_spi_set_freq(DEFAULT_SPI_CLOCKRATE);
-
-		if (rc)
-			qmrom_reboot_bootloader(h);
-
-		/* The Macro Package contain the fw updater and the package
-		 * simply flash the first and provide the second to
-		 * the updater lib
-		 */
-		h->skip_check_fw_boot = true;
-		rc = qm357xx_rom_flash_fw(h, fw);
-		h->skip_check_fw_boot = false;
-		if (rc) {
-			dev_err(&qm35_hdl->spi->dev,
-				"Attempt %d: fw updater flashing failed with %d!\n",
-				flashing_retries - nb_retries, rc);
-			if (rc == PEG_ERR_FIRST_KEY_CERT_OR_FW_VER)
-				break;
-			continue;
-		}
-
-		/* Now flash the firmware proper */
-		if (fu_spi_speed_hz)
-			qmrom_spi_set_freq(fu_spi_speed_hz);
-		else
-			qmrom_spi_set_freq(FWUPDATER_SPI_SPEED_HZ);
-		rc = run_fwupdater(h, fw_data, fw_size);
-		if (rc) {
-			dev_err(&qm35_hdl->spi->dev,
-				"Attempt %d: fw app flashing failed with %d!\n",
-				flashing_retries - nb_retries, rc);
-		}
-	} while (rc && --nb_retries > 0);
-	return rc;
-}
-
 static int qm_firmware_flashing(void *handle, struct qmrom_handle *h,
-				bool *is_macro_pkg, bool use_prod_fw)
+				bool use_prod_fw)
 {
 	struct qm35_ctx *qm35_hdl = (struct qm35_ctx *)handle;
 	struct spi_device *spi = qm35_hdl->spi;
-	int rc = 0;
 	const struct firmware *fw;
-#ifdef C0_WRITE_STATS
-	uint64_t elapsed_time_ns;
-	ktime_t start_time;
-#endif
+	int ret = 0;
 
-	fw = qmrom_spi_get_firmware(&spi->dev, h, is_macro_pkg, use_prod_fw);
+	fw = qmrom_spi_get_firmware(&spi->dev, h, use_prod_fw);
 	if (fw == NULL) {
 		dev_err(&spi->dev, "Firmware file not present!\n");
 		return -1;
 	}
 
-#ifdef C0_WRITE_STATS
-	start_time = ktime_get();
-#endif
-
-	qm35_hdl->flashing = true;
-	if (!*is_macro_pkg)
-		rc = qm_firmware_flash_fw(qm35_hdl, h, fw);
-	else
-		rc = qm_firmware_flash_macro_pkg(qm35_hdl, h, fw);
-
-#ifdef C0_WRITE_STATS
-	elapsed_time_ns = ktime_to_ns(ktime_sub(ktime_get(), start_time));
-	if (!rc)
-		dev_warn(&spi->dev, "Firmware flashed in %llu us\n",
-			 div_u64(elapsed_time_ns, 1000));
-#endif
+	ret = qmrom_flash_fw(h, fw);
+	dev_dbg(&spi->dev, "Return qmrom_flash_fw = %d!\n", ret);
 
 	qmrom_spi_release_firmware(fw);
-	qm35_hdl->flashing = false;
-
-	/* Reset the device anyway */
-	qmrom_spi_reset_device(qm35_hdl);
-	return rc;
+	return ret;
 }
 
 static int qm_firmware_load(struct qm35_ctx *qm35_hdl)
@@ -613,42 +482,32 @@ static int qm_firmware_load(struct qm35_ctx *qm35_hdl)
 	struct spi_device *spi = qm35_hdl->spi;
 	unsigned int state = qm35_get_state(qm35_hdl);
 	struct qmrom_handle *h;
-	bool is_macro_pkg = false;
 	int ret;
 
 	qm35_set_state(qm35_hdl, QM35_CTRL_STATE_FW_DOWNLOADING);
 
 	qmrom_set_log_device(&spi->dev, LOG_WARN);
 
-	enable_irq(qm35_hdl->ss_rdy_irq);
-
-	qm35_hdl->flashing = true;
-
-	h = qmrom_init(&spi->dev, qm35_hdl, qm35_hdl, qm35_hdl->gpio_ss_irq,
-		       qmrom_spi_speed_hz, qmrom_retries,
-		       qmrom_spi_reset_device, DEVICE_GEN_QM357XX);
+	h = qmrom_init(&spi->dev, qm35_hdl, qm35_hdl->gpio_ss_rdy,
+		       qmrom_retries, qmrom_spi_reset_device);
 	if (!h) {
 		pr_err("qmrom_init failed\n");
 		ret = -1;
 		goto out;
 	}
 
-	qm35_hdl->flashing = false;
-
 	dev_info(&spi->dev, "    chip_ver:  %x\n", h->chip_rev);
 	dev_info(&spi->dev, "    dev_id:    deca%04x\n", h->device_version);
 
 	if (h->chip_rev != CHIP_REVISION_A0) {
-		dev_info(&spi->dev, "    soc_id:    %*phN\n",
-			 QM357XX_ROM_SOC_ID_LEN, h->qm357xx_soc_info.soc_id);
-		dev_info(&spi->dev, "    uuid:      %*phN\n",
-			 QM357XX_ROM_UUID_LEN, h->qm357xx_soc_info.uuid);
-		dev_info(&spi->dev, "    lcs_state: %u\n",
-			 h->qm357xx_soc_info.lcs_state);
+		dev_info(&spi->dev, "    soc_id:    %*phN\n", ROM_SOC_ID_LEN,
+			 h->soc_id);
+		dev_info(&spi->dev, "    uuid:      %*phN\n", ROM_UUID_LEN,
+			 h->uuid);
+		dev_info(&spi->dev, "    lcs_state: %u\n", h->lcs_state);
 
 		memcpy(&qm_dev_id, &h->device_version, sizeof(qm_dev_id));
-		memcpy(qm_soc_id, h->qm357xx_soc_info.soc_id,
-		       QM357XX_ROM_SOC_ID_LEN);
+		memcpy(qm_soc_id, h->soc_id, ROM_SOC_ID_LEN);
 
 		debug_soc_info_available(&qm35_hdl->debug);
 	} else {
@@ -657,23 +516,19 @@ static int qm_firmware_load(struct qm35_ctx *qm35_hdl)
 	}
 
 	dev_dbg(&spi->dev, "Starting device flashing!\n");
-	ret = qm_firmware_flashing(qm35_hdl, h, &is_macro_pkg, true);
+	ret = qm_firmware_flashing(qm35_hdl, h, true);
 	if (ret) {
 		qmrom_reboot_bootloader(h);
-		ret = qm_firmware_flashing(qm35_hdl, h, &is_macro_pkg, false);
+		ret = qm_firmware_flashing(qm35_hdl, h, false);
 	}
 
 	if (ret)
 		dev_err(&spi->dev, "Firmware download failed with %d!\n", ret);
 	else
-		dev_info(&spi->dev, "Device flashing succeeded!\n");
+		dev_info(&spi->dev, "Device flashing completed!\n");
 
 out:
-	disable_irq_nosync(qm35_hdl->ss_rdy_irq);
-
 	qm35_set_state(qm35_hdl, state);
-
-	qm35_hdl->flashing = false;
 
 	return ret;
 }
@@ -687,7 +542,7 @@ int qm_get_dev_id(struct qm35_ctx *qm35_hdl, uint16_t *dev_id)
 
 int qm_get_soc_id(struct qm35_ctx *qm35_hdl, uint8_t *soc_id)
 {
-	memcpy(soc_id, qm_soc_id, QM357XX_ROM_SOC_ID_LEN);
+	memcpy(soc_id, qm_soc_id, ROM_SOC_ID_LEN);
 
 	return 0;
 }
@@ -712,7 +567,8 @@ int qm_get_soc_id(struct qm35_ctx *qm35_hdl, uint8_t *soc_id)
  */
 static int hsspi_irqs_setup(struct qm35_ctx *qm35_ctx)
 {
-	int ret, irq;
+	int ret;
+	unsigned long ss_irqflags;
 
 	/* Get READY GPIO */
 	qm35_ctx->gpio_ss_rdy =
@@ -720,47 +576,25 @@ static int hsspi_irqs_setup(struct qm35_ctx *qm35_ctx)
 	if (IS_ERR(qm35_ctx->gpio_ss_rdy))
 		return PTR_ERR(qm35_ctx->gpio_ss_rdy);
 
-	irq = gpiod_to_irq(qm35_ctx->gpio_ss_rdy);
-	if (irq < 0) {
-		dev_err(&qm35_ctx->spi->dev,
-			"gpiod_to_irq(ss-ready) returns %d", irq);
-		return irq;
-	}
-	qm35_ctx->ss_rdy_irq = irq;
-	ret = devm_request_irq(&qm35_ctx->spi->dev, irq, &qm35_ss_rdy_handler,
-			       IRQF_TRIGGER_RISING, "hsspi-ss-rdy", qm35_ctx);
-	if (ret) {
-		dev_err(&qm35_ctx->spi->dev, "%s: devm_request_irq returned %d",
-			__func__, ret);
+	ret = devm_request_irq(&qm35_ctx->spi->dev,
+			       gpiod_to_irq(qm35_ctx->gpio_ss_rdy),
+			       &qm35_ss_rdy_handler, IRQF_TRIGGER_RISING,
+			       "hsspi-ss-rdy", qm35_ctx);
+	if (ret)
 		return ret;
-	}
-	/* devm_request_irq enables the interrupt. On probe, the hsspi is in
-	 * HSSPI_STOPPED state by default. In this state, the interrupt is
-	 * expected to be disabled. */
-	disable_irq(irq);
 
 	/* get SS_IRQ GPIO */
-	qm35_ctx->gpio_ss_irq =
-		devm_gpiod_get(&qm35_ctx->spi->dev, "ss-irq", GPIOD_IN);
-	if (IS_ERR(qm35_ctx->gpio_ss_irq)) {
-		dev_err(&qm35_ctx->spi->dev,
-			"gpiod_get_index(ss-irq) returned %pK",
-			qm35_ctx->gpio_ss_irq);
-	}
+	qm35_ctx->gpio_ss_irq = devm_gpiod_get_optional(&qm35_ctx->spi->dev,
+							"ss-irq", GPIOD_IN);
 
-	qm35_ctx->spi->irq = gpiod_to_irq(qm35_ctx->gpio_ss_irq);
-	if (qm35_ctx->spi->irq < 0) {
-		dev_err(&qm35_ctx->spi->dev, "gpiod_to_irq(ss-irq) returned %d",
-			qm35_ctx->spi->irq);
-		return qm35_ctx->spi->irq;
-	}
-	ret = devm_request_irq(&qm35_ctx->spi->dev, qm35_ctx->spi->irq,
-			       &qm35_irq_handler, IRQF_TRIGGER_HIGH,
-			       "hsspi-ss-irq", qm35_ctx);
-	if (ret) {
-		dev_err(&qm35_ctx->spi->dev, "%s: devm_request_irq returned %d",
-			__func__, ret);
-		return ret;
+	if (qm35_ctx->gpio_ss_irq) {
+		if (IS_ERR(qm35_ctx->gpio_ss_irq))
+			return PTR_ERR(qm35_ctx->gpio_ss_irq);
+
+		qm35_ctx->spi->irq = gpiod_to_irq(qm35_ctx->gpio_ss_irq);
+		ss_irqflags = IRQF_TRIGGER_HIGH;
+	} else {
+		ss_irqflags = irq_get_trigger_type(qm35_ctx->spi->irq);
 	}
 
 	if (wake_on_ssirq) {
@@ -774,6 +608,12 @@ static int hsspi_irqs_setup(struct qm35_ctx *qm35_ctx)
 	qm35_ctx->hsspi.wakeup = qm35_wakeup;
 	qm35_ctx->hsspi.reset_qm35 = qm35_reset_hook;
 
+	ret = devm_request_irq(&qm35_ctx->spi->dev, qm35_ctx->spi->irq,
+			       &qm35_irq_handler, ss_irqflags, "hsspi-ss-irq",
+			       qm35_ctx);
+	if (ret)
+		return ret;
+
 	/* Get exton */
 	qm35_ctx->gpio_exton =
 		devm_gpiod_get_optional(&qm35_ctx->spi->dev, "exton", GPIOD_IN);
@@ -781,14 +621,8 @@ static int hsspi_irqs_setup(struct qm35_ctx *qm35_ctx)
 		if (IS_ERR(qm35_ctx->gpio_exton))
 			return PTR_ERR(qm35_ctx->gpio_exton);
 
-		irq = gpiod_to_irq(qm35_ctx->gpio_exton);
-		if (irq < 0) {
-			dev_err(&qm35_ctx->spi->dev,
-				"gpiod_to_irq(exton) returned %d", irq);
-			return irq;
-		}
-
-		ret = devm_request_irq(&qm35_ctx->spi->dev, irq,
+		ret = devm_request_irq(&qm35_ctx->spi->dev,
+				       gpiod_to_irq(qm35_ctx->gpio_exton),
 				       &qm35_exton_handler,
 				       IRQF_TRIGGER_FALLING, "hsspi-exton",
 				       qm35_ctx);
@@ -927,7 +761,6 @@ static int qm35_probe(struct spi_device *spi)
 	qm35_ctx->spi = spi;
 	qm35_ctx->log_qm_traces = log_qm_traces;
 	spin_lock_init(&qm35_ctx->lock);
-	init_waitqueue_head(&qm35_ctx->qmrom_wq_ready);
 
 	spi_set_drvdata(spi, qm35_ctx);
 
@@ -1009,11 +842,11 @@ static int qm35_probe(struct spi_device *spi)
 	if (!NO_UWB_HAL) {
 		/* If regulators not available, QM is powered on */
 		if (!REGULATORS_ENABLED(qm35_ctx))
-			qm35_hsspi_start(qm35_ctx);
+			hsspi_start(&qm35_ctx->hsspi);
 	} else {
 		qm35_regulators_set(qm35_ctx, true);
 		usleep_range(100000, 100000);
-		qm35_hsspi_start(qm35_ctx);
+		hsspi_start(&qm35_ctx->hsspi);
 	}
 
 	ret = misc_register(&qm35_ctx->uci_dev);
@@ -1021,10 +854,6 @@ static int qm35_probe(struct spi_device *spi)
 		dev_err(&spi->dev, "Failed to register uci device\n");
 		goto log_layer_unregister;
 	}
-
-	ret = qm35_register_coredump(qm35_ctx);
-	if (ret)
-		dev_warn(&spi->dev, "SSCD registration failed: %d\n", ret);
 
 	dev_info(&spi->dev, "Registered: [%s] misc device\n", uci_misc->name);
 
@@ -1058,7 +887,7 @@ static int qm35_remove(struct spi_device *spi)
 
 	misc_deregister(&qm35_hdl->uci_dev);
 
-	qm35_hsspi_stop(qm35_hdl);
+	hsspi_stop(&qm35_hdl->hsspi);
 
 	hsspi_unregister(&qm35_hdl->hsspi, &qm35_hdl->log_layer.hlayer);
 	hsspi_unregister(&qm35_hdl->hsspi, &qm35_hdl->coredump_layer.hlayer);
@@ -1068,8 +897,6 @@ static int qm35_remove(struct spi_device *spi)
 	hsspi_test_deinit(&qm35_hdl->hsspi);
 	debug_deinit(&qm35_hdl->debug);
 	uci_layer_deinit(&qm35_hdl->uci_layer);
-
-	qm35_unregister_coredump(qm35_hdl);
 
 	hsspi_deinit(&qm35_hdl->hsspi);
 

@@ -52,8 +52,6 @@
 #define HSSPI_MANUAL_CS_SETUP_US SPI_CS_SETUP_DELAY_US
 #endif
 
-extern int spi_speed_hz;
-
 struct hsspi_work {
 	struct list_head list;
 	enum hsspi_work_type type;
@@ -217,13 +215,11 @@ static int spi_xfer(struct hsspi *hsspi, const void *tx, void *rx,
 			.tx_buf = hsspi->host,
 			.rx_buf = hsspi->soc,
 			.len = sizeof(*(hsspi->host)),
-			.speed_hz = spi_speed_hz,
 		},
 		{
 			.tx_buf = tx,
 			.rx_buf = rx,
 			.len = length,
-			.speed_hz = spi_speed_hz,
 		},
 	};
 	int ret, retry = 5;
@@ -381,8 +377,7 @@ static int hsspi_tx(struct hsspi *hsspi, struct hsspi_layer *layer,
 	/* Ignore tx check flags */
 	check_soc_flag(&hsspi->spi->dev, __func__, hsspi->soc->flags, true);
 
-	if ((hsspi->host->flags & STC_HOST_PRD) &&
-	    (hsspi->soc->flags & STC_SOC_ODW))
+	if (hsspi->host->flags & STC_HOST_PRD)
 		return hsspi_rx(hsspi, hsspi->soc->ul, hsspi->soc->length);
 
 	return ret;
@@ -412,11 +407,7 @@ static int hsspi_pre_read(struct hsspi *hsspi)
 	/* Ignore pre-read check flags */
 	check_soc_flag(&hsspi->spi->dev, __func__, hsspi->soc->flags, true);
 
-	if (hsspi->soc->flags & STC_SOC_ODW)
-		return hsspi_rx(hsspi, hsspi->soc->ul, hsspi->soc->length);
-	else
-		/* Pre-read error. Maybe FW is a little late to setup HSSPI header. */
-		return -1;
+	return hsspi_rx(hsspi, hsspi->soc->ul, hsspi->soc->length);
 }
 
 /**
