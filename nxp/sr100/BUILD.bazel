@@ -1,0 +1,23 @@
+# SPDX-License-Identifier: GPL-2.0-or-later
+
+load(
+    "//build/kernel/kleaf:kernel.bzl",
+    "kernel_module",
+)
+
+kernel_module(
+    name = "sr100",
+    srcs = glob([
+        "**/*.c",
+        "**/*.h",
+    ]) + [
+        "Kbuild",
+    ],
+    outs = [
+        "sr100.ko",
+    ],
+    kernel_build = "//private/google-modules/soc/msm:msm_kernel_build",
+    visibility = [
+        "//private/devices/google:__subpackages__",
+    ],
+)
