@@ -63,6 +63,13 @@ struct sr1xx_spi_platform_data {
 #define USB_HSPHY_1P8_HPM_LOAD			19000	/* uA */
 #define USB_HSPHY_1P8_LOWPOWER_LOAD		1000	/* uA */
 
+enum sr1xx_suspend_mode {
+	SR1XX_SUSPEND_NONE = 0, /* Do nothing on suspend */
+	SR1XX_SUSPEND_RF_LPM,   /* Low power mode for RF regulator */
+	SR1XX_SUSPEND_ALL_LPM,  /* Low power mode for RF & DIG regulator */
+	SR1XX_SUSPEND_OFF,      /* Power down */
+};
+
 /* Device specific macro and structure */
 struct sr1xx_dev {
 	wait_queue_head_t read_wq;          /* wait queue for read interrupt */
@@ -88,6 +95,8 @@ struct sr1xx_dev {
 	atomic_t read_abort_requested;      /* used to indicate read abort request */
 	atomic_t irq_received;              /* flag to indicate that irq is received */
 	bool pwr_enabled;                   /* flag to indicate pwr */
+	bool suspend_entered;               /* flag to indicate suspend mode */
+	enum sr1xx_suspend_mode suspend_mode;
 
 	struct regulator	*regulator_1v8_dig;
 	struct regulator	*regulator_1v8_rf;
@@ -123,56 +132,102 @@ static irqreturn_t sr1xx_dev_irq_handler(int irq, void *dev_id)
 	return IRQ_HANDLED;
 }
 
+static int sr1xx_regulator_ctl(struct sr1xx_dev *sr1xx_dev, bool hpm_dig, bool hpm_rf)
+{
+	int ua_dig = hpm_dig ? USB_HSPHY_1P8_HPM_LOAD : USB_HSPHY_1P8_LOWPOWER_LOAD;
+	int ua_rf = hpm_rf ? USB_HSPHY_1P8_HPM_LOAD : USB_HSPHY_1P8_LOWPOWER_LOAD;
+	int ua_dig_org = hpm_dig ? USB_HSPHY_1P8_LOWPOWER_LOAD : USB_HSPHY_1P8_HPM_LOAD;
+	int ret;
+
+	/*
+	 * In case of failed operation of power/regulator control,
+	 * caller of ioctl should close the device.
+	 */
+	ret = regulator_set_load(sr1xx_dev->regulator_1v8_dig, ua_dig);
+	if (ret) {
+		dev_err(&sr1xx_dev->spi->dev, "failed to set dig regulator load %duA\n", ua_dig);
+		return ret;
+	}
+	ret = regulator_set_load(sr1xx_dev->regulator_1v8_rf, ua_rf);
+	if (ret) {
+		regulator_set_load(sr1xx_dev->regulator_1v8_dig, ua_dig_org);
+		dev_err(&sr1xx_dev->spi->dev, "failed to set rf regulator load\n", ua_rf);
+		return ret;
+	}
+	usleep_range(50, 100);
+	return 0;
+}
+
 static int sr1xx_power_ctl(struct sr1xx_dev *sr1xx_dev, bool on)
+{
+	int ret;
+
+	if (on) {
+		sr1xx_dev->suspend_entered = false;
+		ret = sr1xx_regulator_ctl(sr1xx_dev, true, true);
+		if (ret) {
+			return ret;
+		}
+		if (!sr1xx_dev->pwr_enabled) {
+			dev_info(&sr1xx_dev->spi->dev, "requested chip enabled.\n");
+			sr1xx_dev->pwr_enabled = true;
+
+			gpio_set_value(sr1xx_dev->ce_gpio, 1);
+			/* chip will be turned on within 950us */
+			msleep(2);
+			/* ignore the irq asserted from the last power cycle */
+			atomic_set(&sr1xx_dev->irq_received, 0);
+		}
+	} else {
+		if (sr1xx_dev->pwr_enabled) {
+			dev_info(&sr1xx_dev->spi->dev, "requested chip disabled.\n");
+			gpio_set_value(sr1xx_dev->ce_gpio, 0);
+			sr1xx_dev->pwr_enabled = false;
+		}
+		/* CE low > 80usec --> HPD */
+		usleep_range(160, 240);
+		ret = sr1xx_regulator_ctl(sr1xx_dev, false, false);
+	}
+	return ret;
+}
+
+static int sr1xx_suspend_ctl(struct sr1xx_dev *sr1xx_dev, bool suspend)
 {
 	int ret = 0;
 
-	dev_info(&sr1xx_dev->spi->dev, "requested chip %s.\n", on ? "enabled" : "disabled");
+	dev_info(&sr1xx_dev->spi->dev, "suspend control: %s, mode=%d", suspend ? "SUSPEND" : "RESUME",
+			sr1xx_dev->suspend_mode);
 
-	if (on == sr1xx_dev->pwr_enabled) {
-		dev_warn(&sr1xx_dev->spi->dev, "chip already %s.\n", on ? "enabled" : "disabled");
+	if (sr1xx_dev->suspend_entered == suspend) {
+		dev_warn(&sr1xx_dev->spi->dev, "suspend control: already in %s, mode=%d",
+			suspend ? "SUSPEND" : "RESUME", sr1xx_dev->suspend_mode);
 		return 0;
 	}
 
-	/* TODO: remove dynamic load changes, this was only for Eos development */
-	if (on) {
-		ret = regulator_set_load(sr1xx_dev->regulator_1v8_dig, USB_HSPHY_1P8_HPM_LOAD);
-		if (ret) {
-			dev_err(&sr1xx_dev->spi->dev, "failed to set dig regulator load\n");
-			return ret;
+	if (!suspend) {
+		/* resume: power_ctl(true) also makes regulators NPM */
+		ret = sr1xx_power_ctl(sr1xx_dev, true);
+	} else {
+		/* suspend */
+		switch (sr1xx_dev->suspend_mode) {
+		case SR1XX_SUSPEND_RF_LPM:
+			ret = sr1xx_regulator_ctl(sr1xx_dev, true, false);
+			break;
+		case SR1XX_SUSPEND_ALL_LPM:
+			ret = sr1xx_regulator_ctl(sr1xx_dev, false, false);
+			break;
+		case SR1XX_SUSPEND_OFF:
+			ret = sr1xx_power_ctl(sr1xx_dev, false);
+			break;
+		case SR1XX_SUSPEND_NONE:
+			/* fall through */
+		default:
+			break;
 		}
-		ret = regulator_set_load(sr1xx_dev->regulator_1v8_rf, USB_HSPHY_1P8_HPM_LOAD);
-		if (ret) {
-			dev_err(&sr1xx_dev->spi->dev, "failed to set rf regulator load\n");
-			return ret;
-		}
-		usleep_range(50, 100);
-
-		sr1xx_dev->pwr_enabled = true;
-
-		/* ignore the irq asserted from the last power cycle */
-		atomic_set(&sr1xx_dev->irq_received, 0);
-
-		gpio_set_value(sr1xx_dev->ce_gpio, 1);
-		msleep(10);
-	} else if (!on) {
-		gpio_set_value(sr1xx_dev->ce_gpio, 0);
-		msleep(10);
-
-		ret = regulator_set_load(sr1xx_dev->regulator_1v8_dig, USB_HSPHY_1P8_LOWPOWER_LOAD);
-		if (ret) {
-			dev_err(&sr1xx_dev->spi->dev, "failed to set dig regulator load\n");
-			return ret;
-		}
-		ret = regulator_set_load(sr1xx_dev->regulator_1v8_rf, USB_HSPHY_1P8_LOWPOWER_LOAD);
-		if (ret) {
-			dev_err(&sr1xx_dev->spi->dev, "failed to set rf regulator load\n");
-			return ret;
-		}
-
-		sr1xx_dev->pwr_enabled = false;
 	}
-
+	if (!ret) {
+		sr1xx_dev->suspend_entered = suspend;
+	}
 	return ret;
 }
 
@@ -194,6 +249,10 @@ static long sr1xx_dev_ioctl(struct file *filp, unsigned int cmd,
 			ret = sr1xx_power_ctl(sr1xx_dev, true);
 		} else if (arg == PWR_DISABLE) {
 			ret = sr1xx_power_ctl(sr1xx_dev, false);
+		} else if (arg == PWR_SUSPEND) {
+			sr1xx_suspend_ctl(sr1xx_dev, true);
+		} else if (arg == PWR_RESUME) {
+			sr1xx_suspend_ctl(sr1xx_dev, false);
 		} else if (arg == ABORT_READ_PENDING) {
 			dev_info(&sr1xx_dev->spi->dev, "Abort read requested\n");
 			atomic_set(&sr1xx_dev->read_abort_requested, 1);
@@ -441,6 +500,13 @@ static ssize_t sr1xx_dev_write(struct file *filp, const char *buf, size_t count,
 	struct sr1xx_dev *sr1xx_dev;
 
 	sr1xx_dev = filp->private_data;
+
+	if (!sr1xx_dev->pwr_enabled || sr1xx_dev->suspend_entered) {
+		dev_err(&sr1xx_dev->spi->dev, "write called while in low power mode %s,%s\n",
+				sr1xx_dev->pwr_enabled ? "ACTIVE" : "HPD",
+				sr1xx_dev->suspend_entered ? "LPM" : "NPM");
+	}
+
 	if (count > SR1XX_MAX_TX_BUF_SIZE || count > SR1XX_TXBUF_SIZE) {
 		dev_err(&sr1xx_dev->spi->dev, "%s : Write Size Exceeds\n", __func__);
 		ret = -ENOBUFS;
@@ -608,7 +674,7 @@ static int sr1xx_hw_setup(struct device *dev,
 		dev_err(dev, "sr1xx - Failed setting spi handeshake gpio - %d\n", platform_data->spi_handshake_gpio);
 		goto fail_gpio;
 	}
-	/* TODO: start with low power mode only for Eos */
+	/* start with low power mode */
 	ret = regulator_set_load(platform_data->regulator_1v8_dig, USB_HSPHY_1P8_LOWPOWER_LOAD);
 	if (ret < 0) {
 		dev_err(dev, "Unable to set HPM of regulator_1v8_dig:%d\n", ret);
@@ -689,6 +755,32 @@ static int sr1xx_parse_dt(struct device *dev, struct sr1xx_spi_platform_data *pd
 
 	return 0;
 }
+
+static ssize_t suspend_mode_show(struct device *dev, struct device_attribute *attr, char *buf)
+{
+	struct sr1xx_dev *sr1xx_dev = dev_get_drvdata(dev);
+	return sysfs_emit(buf, "%d\n", sr1xx_dev->suspend_mode);
+}
+
+static ssize_t suspend_mode_store(struct device *dev, struct device_attribute *attr, const char *buf, size_t count)
+{
+	struct sr1xx_dev *sr1xx_dev = dev_get_drvdata(dev);
+	unsigned long value;
+	int ret;
+
+	ret = kstrtoul(buf, 0, &value);
+	if (ret < 0 || ret > SR1XX_SUSPEND_OFF)
+		return -EINVAL;
+	sr1xx_dev->suspend_mode = value;
+	return count;
+}
+static DEVICE_ATTR_RW(suspend_mode);
+
+static struct attribute *sr1xx_attrs[] = {
+	&dev_attr_suspend_mode.attr,
+	NULL,
+};
+ATTRIBUTE_GROUPS(sr1xx);
 
 static int sr1xx_probe(struct spi_device *spi)
 {
@@ -878,6 +970,7 @@ static struct spi_driver sr1xx_driver = {
 		.name = "srxxx",
 		.pm = &sr1xx_dev_pm_ops,
 		.of_match_table = sr1xx_dt_match,
+		.dev_groups = sr1xx_groups,
 	},
 	.probe = sr1xx_probe,
 	.remove = (sr1xx_remove),
