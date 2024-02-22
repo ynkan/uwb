@@ -38,7 +38,7 @@
 
 #define MAXNAME 32
 #define DW_ENTRY __array(char, dw_name, MAXNAME)
-#define DW_ASSIGN strlcpy(__entry->dw_name, dw->dev->kobj.name, MAXNAME)
+#define DW_ASSIGN strscpy(__entry->dw_name, dw->dev->kobj.name, sizeof(__entry->dw_name))
 #define DW_PR_FMT "%s"
 #define DW_PR_ARG __entry->dw_name
 
