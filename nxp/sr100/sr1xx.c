@@ -535,7 +535,8 @@ static ssize_t sr1xx_dev_read(struct file *filp, char *buf, size_t count, loff_t
 		if (!atomic_read(&sr1xx_dev->read_abort_requested)) {
 			ret = sr1xx_wait_irq(sr1xx_dev, 0);
 			if (ret && !atomic_read(&sr1xx_dev->read_abort_requested)) {
-				dev_err(&sr1xx_dev->spi->dev, "wait_event_interruptible() : Failed.\n");
+				if (ret != -ERESTARTSYS)
+					dev_err(&sr1xx_dev->spi->dev, "wait_event_interruptible() : Failed. %d\n", ret);
 				goto read_end;
 			}
 		}
