@@ -295,11 +295,12 @@ static long sr1xx_dev_ioctl_compat(struct file* filp, unsigned int cmd, unsigned
 #define sr1xx_dev_ioctl_compat NULL
 #endif
 
-static int sr1xx_wait_irq(struct sr1xx_dev* sr1xx_dev, long timeout)
+static int sr1xx_wait_irq(struct sr1xx_dev* sr1xx_dev, long timeout_ms)
 {
 	int ret;
 
-	if (timeout) {
+	if (timeout_ms) {
+		long timeout = msecs_to_jiffies(timeout_ms);
 		ret = wait_event_interruptible_timeout(sr1xx_dev->read_wq,
 				atomic_read(&sr1xx_dev->irq_received), timeout);
 		if (ret > 0)
