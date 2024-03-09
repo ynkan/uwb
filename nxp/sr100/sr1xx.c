@@ -41,6 +41,9 @@
 
 #define ESE_COLD_RESET 0
 
+#define WRITE_DELAY 100
+#define WRITE_DELAY_RANGE_DIFF 50
+
 #if ESE_COLD_RESET
 #include "../nfc/common_ese.h"
 /*Invoke cold reset if no response from eSE*/
@@ -357,6 +360,7 @@ static int sr1xx_dev_transceive(struct sr1xx_dev *sr1xx_dev, int op_mode,
 {
 	int ret, retry_count;
 	mutex_lock(&sr1xx_dev->sr1xx_access_lock);
+
 	sr1xx_dev->mode = op_mode;
 	sr1xx_dev->total_bytes_to_read = 0;
 	sr1xx_dev->is_extended_len_bit_set = 0;
@@ -379,7 +383,7 @@ static int sr1xx_dev_transceive(struct sr1xx_dev *sr1xx_dev, int op_mode,
 		}
 		if (count > 0) {
 			/* In between header write and payload write UWBS needs some time */
-			usleep_range(30, 50);
+			usleep_range(WRITE_DELAY, WRITE_DELAY + WRITE_DELAY_RANGE_DIFF);
 			/* UCI Payload write */
 			ret = spi_write(sr1xx_dev->spi,
 					sr1xx_dev->tx_buffer +
