@@ -90,9 +90,7 @@ struct sr1xx_dev {
 	struct mutex sr1xx_access_lock;     /* lock used to synchronize read and write */
 	size_t total_bytes_to_read;         /* total bytes read from the device */
 
-	bool is_extended_len_bit_set;       /* variable to check ext payload Len */
 	bool is_fw_dwnld_enabled;           /* used to indicate fw download mode */
-	int mode;                           /* indicate write or read mode */
 	long timeout_in_ms;                 /* wait event interrupt timeout in ms */
 
 	atomic_t read_abort_requested;      /* used to indicate read abort request */
@@ -359,15 +357,15 @@ static int sr1xx_dev_transceive(struct sr1xx_dev *sr1xx_dev, int op_mode,
 				int count)
 {
 	int ret, retry_count;
+	bool is_extended_len_bit_set = false;
+
 	mutex_lock(&sr1xx_dev->sr1xx_access_lock);
 
-	sr1xx_dev->mode = op_mode;
 	sr1xx_dev->total_bytes_to_read = 0;
-	sr1xx_dev->is_extended_len_bit_set = 0;
 	ret = -EIO;
 	retry_count = 0;
 
-	switch (sr1xx_dev->mode) {
+	switch (op_mode) {
 	case SR1XX_WRITE_MODE:
 		sr1xx_dev->write_count = 0;
 		/* UCI Header write */
@@ -427,10 +425,10 @@ static int sr1xx_dev_transceive(struct sr1xx_dev *sr1xx_dev, int op_mode,
 				((sr1xx_dev->total_bytes_to_read << 8) |
 				sr1xx_dev->rx_buffer[UCI_EXT_PAYLOAD_LEN_OFFSET]);
 		} else {
-			sr1xx_dev->is_extended_len_bit_set =
+			is_extended_len_bit_set =
 			    (sr1xx_dev->rx_buffer[UCI_EXT_PAYLOAD_LEN_IND_OFFSET] & UCI_EXT_PAYLOAD_LEN_IND_OFFSET_MASK);
 			sr1xx_dev->total_bytes_to_read = sr1xx_dev->rx_buffer[UCI_PAYLOAD_LEN_OFFSET];
-			if (sr1xx_dev->is_extended_len_bit_set) {
+			if (is_extended_len_bit_set) {
 				sr1xx_dev->total_bytes_to_read =
 				    ((sr1xx_dev->total_bytes_to_read << 8) |
 				     sr1xx_dev->rx_buffer[UCI_EXT_PAYLOAD_LEN_OFFSET]);
@@ -464,7 +462,7 @@ static int sr1xx_dev_transceive(struct sr1xx_dev *sr1xx_dev, int op_mode,
 		break;
 	}
 transceive_end:
-	if (sr1xx_dev->mode == SR1XX_READ_MODE)
+	if (op_mode == SR1XX_READ_MODE)
 		gpio_set_value(sr1xx_dev->spi_handshake_gpio, 0);
 
 	mutex_unlock(&sr1xx_dev->sr1xx_access_lock);
