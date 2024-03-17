@@ -90,13 +90,15 @@ struct sr1xx_dev {
 	struct mutex sr1xx_access_lock;     /* lock used to synchronize read and write */
 	size_t total_bytes_to_read;         /* total bytes read from the device */
 
-	bool is_fw_dwnld_enabled;           /* used to indicate fw download mode */
 	long timeout_in_ms;                 /* wait event interrupt timeout in ms */
 
-	atomic_t read_abort_requested;      /* used to indicate read abort request */
-	atomic_t irq_received;              /* flag to indicate that irq is received */
-	bool pwr_enabled;                   /* flag to indicate pwr */
-	bool suspend_entered;               /* flag to indicate suspend mode */
+#define FLAGS_FW_DOWNLOAD	0
+#define FLAGS_READ_ABORTED	1
+#define FLAGS_IRQ_RECEIVED	2
+#define FLAGS_PWR_ENABLED	3
+#define FLAGS_SUSPENDED		4
+	volatile unsigned long flags;
+
 	enum sr1xx_suspend_mode suspend_mode;
 
 	struct regulator	*regulator_1v8_dig;
@@ -109,6 +111,45 @@ enum spi_status_codes {
 	IRQ_WAIT_REQUEST,
 	IRQ_WAIT_TIMEOUT
 };
+
+static bool srflags_test(struct sr1xx_dev *sr1xx_dev, unsigned long flags)
+{
+	return test_bit(flags, &sr1xx_dev->flags);
+}
+
+static void srflags_set(struct sr1xx_dev *sr1xx_dev, unsigned long flags)
+{
+	smp_mb__before_atomic();
+	set_bit(flags, &sr1xx_dev->flags);
+	smp_mb__after_atomic();
+}
+
+static void srflags_clear(struct sr1xx_dev *sr1xx_dev, unsigned long flags)
+{
+	smp_mb__before_atomic();
+	clear_bit(flags, &sr1xx_dev->flags);
+	smp_mb__after_atomic();
+}
+
+static bool srflags_test_and_set(struct sr1xx_dev *sr1xx_dev, unsigned long flags)
+{
+	bool ret;
+
+	smp_mb__before_atomic();
+	ret = test_and_set_bit(flags, &sr1xx_dev->flags);
+	smp_mb__after_atomic();
+	return ret;
+}
+
+static bool srflags_test_and_clear(struct sr1xx_dev *sr1xx_dev, unsigned long flags)
+{
+	bool ret;
+
+	smp_mb__before_atomic();
+	ret = test_and_clear_bit(flags, &sr1xx_dev->flags);
+	smp_mb__after_atomic();
+	return ret;
+}
 
 /* Spi write/read operation mode */
 enum spi_operation_modes { SR1XX_WRITE_MODE, SR1XX_READ_MODE };
@@ -125,7 +166,7 @@ static irqreturn_t sr1xx_dev_irq_handler(int irq, void *dev_id)
 {
 	struct sr1xx_dev *sr1xx_dev = dev_id;
 
-	atomic_set(&sr1xx_dev->irq_received, 1);
+	srflags_set(sr1xx_dev, FLAGS_IRQ_RECEIVED);
 
 	/* Wake up waiting readers */
 	wake_up(&sr1xx_dev->read_wq);
@@ -164,26 +205,24 @@ static int sr1xx_power_ctl(struct sr1xx_dev *sr1xx_dev, bool on)
 	int ret;
 
 	if (on) {
-		sr1xx_dev->suspend_entered = false;
+		srflags_clear(sr1xx_dev, FLAGS_SUSPENDED);
 		ret = sr1xx_regulator_ctl(sr1xx_dev, true, true);
 		if (ret) {
 			return ret;
 		}
-		if (!sr1xx_dev->pwr_enabled) {
+		if (!srflags_test_and_set(sr1xx_dev, FLAGS_PWR_ENABLED)) {
 			dev_info(&sr1xx_dev->spi->dev, "requested chip enabled.\n");
-			sr1xx_dev->pwr_enabled = true;
 
 			gpio_set_value(sr1xx_dev->ce_gpio, 1);
 			/* chip will be turned on within 950us */
 			msleep(2);
 			/* ignore the irq asserted from the last power cycle */
-			atomic_set(&sr1xx_dev->irq_received, 0);
+			srflags_clear(sr1xx_dev, FLAGS_IRQ_RECEIVED);
 		}
 	} else {
-		if (sr1xx_dev->pwr_enabled) {
+		if (srflags_test_and_clear(sr1xx_dev, FLAGS_PWR_ENABLED)) {
 			dev_info(&sr1xx_dev->spi->dev, "requested chip disabled.\n");
 			gpio_set_value(sr1xx_dev->ce_gpio, 0);
-			sr1xx_dev->pwr_enabled = false;
 		}
 		/* CE low > 80usec --> HPD */
 		usleep_range(160, 240);
@@ -199,7 +238,7 @@ static int sr1xx_suspend_ctl(struct sr1xx_dev *sr1xx_dev, bool suspend)
 	dev_info(&sr1xx_dev->spi->dev, "suspend control: %s, mode=%d", suspend ? "SUSPEND" : "RESUME",
 			sr1xx_dev->suspend_mode);
 
-	if (sr1xx_dev->suspend_entered == suspend) {
+	if (srflags_test(sr1xx_dev, FLAGS_SUSPENDED) == suspend) {
 		dev_warn(&sr1xx_dev->spi->dev, "suspend control: already in %s, mode=%d",
 			suspend ? "SUSPEND" : "RESUME", sr1xx_dev->suspend_mode);
 		return 0;
@@ -227,7 +266,10 @@ static int sr1xx_suspend_ctl(struct sr1xx_dev *sr1xx_dev, bool suspend)
 		}
 	}
 	if (!ret) {
-		sr1xx_dev->suspend_entered = suspend;
+		if (suspend)
+			srflags_set(sr1xx_dev, FLAGS_SUSPENDED);
+		else
+			srflags_clear(sr1xx_dev, FLAGS_SUSPENDED);
 	}
 	return ret;
 }
@@ -256,18 +298,18 @@ static long sr1xx_dev_ioctl(struct file *filp, unsigned int cmd,
 			sr1xx_suspend_ctl(sr1xx_dev, false);
 		} else if (arg == ABORT_READ_PENDING) {
 			dev_info(&sr1xx_dev->spi->dev, "Abort read requested\n");
-			atomic_set(&sr1xx_dev->read_abort_requested, 1);
+			srflags_set(sr1xx_dev, FLAGS_READ_ABORTED);
 			/* Wake up waiting readers */
 			wake_up(&sr1xx_dev->read_wq);
 		}
 		break;
 	case SR1XX_SET_FWD:
 		if (arg == 1) {
-			sr1xx_dev->is_fw_dwnld_enabled = true;
-			atomic_set(&sr1xx_dev->read_abort_requested, 0);
+			srflags_set(sr1xx_dev, FLAGS_FW_DOWNLOAD);
+			srflags_clear(sr1xx_dev, FLAGS_READ_ABORTED);
 		}
 		else if(arg == 0) {
-			sr1xx_dev->is_fw_dwnld_enabled = false;
+			srflags_clear(sr1xx_dev, FLAGS_FW_DOWNLOAD);
 		}
 		break;
 
@@ -303,19 +345,19 @@ static int sr1xx_wait_irq(struct sr1xx_dev* sr1xx_dev, long timeout_ms)
 	if (timeout_ms) {
 		long timeout = msecs_to_jiffies(timeout_ms);
 		ret = wait_event_interruptible_timeout(sr1xx_dev->read_wq,
-				atomic_read(&sr1xx_dev->irq_received), timeout);
+				srflags_test(sr1xx_dev, FLAGS_IRQ_RECEIVED), timeout);
 		if (ret > 0)
 			ret = 0;
 		else if (ret == 0)
 			ret = -ETIMEDOUT;
 	} else {
 		ret = wait_event_interruptible(sr1xx_dev->read_wq,
-				atomic_read(&sr1xx_dev->irq_received) ||
-				atomic_read(&sr1xx_dev->read_abort_requested));
+				srflags_test(sr1xx_dev, FLAGS_IRQ_RECEIVED) ||
+				srflags_test(sr1xx_dev, FLAGS_READ_ABORTED));
 	}
 
 	if (!ret)
-		atomic_set(&sr1xx_dev->irq_received, 0);
+		srflags_clear(sr1xx_dev, FLAGS_IRQ_RECEIVED);
 
 	return ret;
 }
@@ -397,7 +439,7 @@ static int sr1xx_dev_transceive(struct sr1xx_dev *sr1xx_dev, int op_mode,
 		ret = TRANSCEIVE_SUCCESS;
 		break;
 	case SR1XX_READ_MODE:
-		if (!sr1xx_dev->is_fw_dwnld_enabled && !gpio_get_value(sr1xx_dev->irq_gpio)) {
+		if (!srflags_test(sr1xx_dev, FLAGS_FW_DOWNLOAD) && !gpio_get_value(sr1xx_dev->irq_gpio)) {
 			dev_err(&sr1xx_dev->spi->dev,
 				"IRQ might have gone low due to write ");
 			ret = IRQ_WAIT_REQUEST;
@@ -504,10 +546,10 @@ static ssize_t sr1xx_dev_write(struct file *filp, const char *buf, size_t count,
 
 	sr1xx_dev = filp->private_data;
 
-	if (!sr1xx_dev->pwr_enabled || sr1xx_dev->suspend_entered) {
+	if (!srflags_test(sr1xx_dev, FLAGS_PWR_ENABLED) || srflags_test(sr1xx_dev, FLAGS_SUSPENDED)) {
 		dev_err(&sr1xx_dev->spi->dev, "write called while in low power mode %s,%s\n",
-				sr1xx_dev->pwr_enabled ? "ACTIVE" : "HPD",
-				sr1xx_dev->suspend_entered ? "LPM" : "NPM");
+				srflags_test(sr1xx_dev, FLAGS_PWR_ENABLED) ? "ACTIVE" : "HPD",
+				srflags_test(sr1xx_dev, FLAGS_SUSPENDED) ? "LPM" : "NPM");
 	}
 
 	if (count > SR1XX_MAX_TX_BUF_SIZE || count > SR1XX_TXBUF_SIZE) {
@@ -519,7 +561,7 @@ static ssize_t sr1xx_dev_write(struct file *filp, const char *buf, size_t count,
 		dev_err(&sr1xx_dev->spi->dev, "%s : failed to copy from user space\n", __func__);
 		return -EFAULT;
 	}
-	if (sr1xx_dev->is_fw_dwnld_enabled)
+	if (srflags_test(sr1xx_dev, FLAGS_FW_DOWNLOAD))
 		ret = sr1xx_hbci_write(sr1xx_dev, count);
 	else
 		ret = sr1xx_dev_transceive(sr1xx_dev, SR1XX_WRITE_MODE, count);
@@ -558,7 +600,7 @@ static ssize_t sr1xx_hbci_read(struct sr1xx_dev *sr1xx_dev, char *buf, size_t co
 		ret = -EIO;
 		goto hbci_fail;
 	}
-	if (atomic_cmpxchg(&sr1xx_dev->read_abort_requested, 1, 0)) {
+	if (srflags_test_and_clear(sr1xx_dev, FLAGS_READ_ABORTED)) {
 		dev_err(&sr1xx_dev->spi->dev, "HBCI Abort Read pending......\n");
 		return ret;
 	}
@@ -584,32 +626,32 @@ static ssize_t sr1xx_dev_read(struct file *filp, char *buf, size_t count, loff_t
 	struct sr1xx_dev *sr1xx_dev = filp->private_data;
 	int ret = -EIO;
 
-	if (!sr1xx_dev->pwr_enabled)
+	if (!srflags_test(sr1xx_dev, FLAGS_PWR_ENABLED))
 		return -EIO;
 
 	memset(sr1xx_dev->rx_buffer, 0x00, SR1XX_RXBUF_SIZE);
 
 	/* HBCI packet read */
-	if (sr1xx_dev->is_fw_dwnld_enabled) {
+	if (srflags_test(sr1xx_dev, FLAGS_FW_DOWNLOAD)) {
 		ret = sr1xx_hbci_read(sr1xx_dev, buf, count);
 		goto read_end;
 	}
 	/* UCI packet read */
-	if (!atomic_read(&sr1xx_dev->irq_received) && (filp->f_flags & O_NONBLOCK)) {
+	if ((filp->f_flags & O_NONBLOCK) && !srflags_test(sr1xx_dev, FLAGS_IRQ_RECEIVED)) {
 		ret = -EAGAIN;
 		goto read_end;
 	}
 
 	do {
-		if (!atomic_read(&sr1xx_dev->read_abort_requested)) {
+		if (!srflags_test(sr1xx_dev, FLAGS_READ_ABORTED)) {
 			ret = sr1xx_wait_irq(sr1xx_dev, 0);
-			if (ret && !atomic_read(&sr1xx_dev->read_abort_requested)) {
+			if (ret && !srflags_test(sr1xx_dev, FLAGS_READ_ABORTED)) {
 				if (ret != -ERESTARTSYS)
 					dev_err(&sr1xx_dev->spi->dev, "wait_event_interruptible() : Failed. %d\n", ret);
 				goto read_end;
 			}
 		}
-		if (atomic_cmpxchg(&sr1xx_dev->read_abort_requested, 1, 0)) {
+		if (srflags_test_and_clear(sr1xx_dev, FLAGS_READ_ABORTED)) {
 			dev_err(&sr1xx_dev->spi->dev, "Abort Read pending......\n");
 			return -EAGAIN;
 		}
@@ -864,8 +906,6 @@ static int sr1xx_probe(struct spi_device *spi)
 	 * for reading. It is cleared when all data has been read.
 	 */
 	irq_flags = IRQF_TRIGGER_RISING;
-	atomic_set(&sr1xx_dev->irq_received, 0);
-	atomic_set(&sr1xx_dev->read_abort_requested, 0);
 	sr1xx_dev->timeout_in_ms = 500;
 
 	ret = request_irq(sr1xx_dev->spi->irq, sr1xx_dev_irq_handler, irq_flags,
