@@ -2,9 +2,12 @@
 /*
  * SPI driver for UWB SR1xx
  * Copyright (C) 2018-2022 NXP.
+ * Copyright (C) 2024 Google, Inc.
  *
  * Author: Manjunatha Venkatesh <manjunatha.venkatesh@nxp.com>
+ * Author: Ikjoon Jang <ikjn@google.com>
  */
+
 #include <linux/delay.h>
 #include <linux/interrupt.h>
 #include <linux/ktime.h>
@@ -39,16 +42,8 @@
 /* Maximum UCI packet size supported from the driver */
 #define MAX_UCI_PKT_SIZE 4200
 
-#define ESE_COLD_RESET 0
-
 #define WRITE_DELAY 100
 #define WRITE_DELAY_RANGE_DIFF 50
-
-#if ESE_COLD_RESET
-#include "../nfc/common_ese.h"
-/*Invoke cold reset if no response from eSE*/
-extern int perform_ese_cold_reset(unsigned long source);
-#endif
 
 struct sr1xx_spi_platform_data {
 	unsigned int irq_gpio;
@@ -73,6 +68,24 @@ enum sr1xx_suspend_mode {
 	SR1XX_SUSPEND_OFF,      /* Power down */
 };
 
+#define NR_RX_BUFFERS		64
+#define NR_DROPS_ON_FULL	4	/* drop oldest packets when rxq is full */
+#define FALLBACK_ON_FULL_MS	100	/* wait before dropping packets */
+#define MAX_RETRIES_ON_FULL	3
+
+struct rx_buffer {
+	void	*buff;
+	size_t	len;
+};
+
+struct rx_queue {
+	int head;
+	int tail;
+	spinlock_t lock;
+	struct rx_buffer buffers[NR_RX_BUFFERS];
+	wait_queue_head_t wq;
+};
+
 /* Device specific macro and structure */
 struct sr1xx_dev {
 	wait_queue_head_t read_wq;          /* wait queue for read interrupt */
@@ -84,11 +97,11 @@ struct sr1xx_dev {
 
 	unsigned char *tx_buffer;           /* transmit buffer */
 	unsigned char *rx_buffer;           /* receive buffer */
-	unsigned int write_count;           /* holds numbers of byte written */
-	unsigned int read_count;            /* hold numbers of byte read */
 
 	struct mutex sr1xx_access_lock;     /* lock used to synchronize read and write */
-	size_t total_bytes_to_read;         /* total bytes read from the device */
+
+	struct task_struct *rx_thread;
+	struct rx_queue rx_queue;
 
 	long timeout_in_ms;                 /* wait event interrupt timeout in ms */
 
@@ -97,6 +110,7 @@ struct sr1xx_dev {
 #define FLAGS_IRQ_RECEIVED	2
 #define FLAGS_PWR_ENABLED	3
 #define FLAGS_SUSPENDED		4
+#define FLAGS_RX_RUNNING	5
 	volatile unsigned long flags;
 
 	enum sr1xx_suspend_mode suspend_mode;
@@ -111,6 +125,9 @@ enum spi_status_codes {
 	IRQ_WAIT_REQUEST,
 	IRQ_WAIT_TIMEOUT
 };
+
+static int start_rx_thread(struct sr1xx_dev *sr1xx_dev);
+static int stop_rx_thread(struct sr1xx_dev *sr1xx_dev);
 
 static bool srflags_test(struct sr1xx_dev *sr1xx_dev, unsigned long flags)
 {
@@ -151,6 +168,155 @@ static bool srflags_test_and_clear(struct sr1xx_dev *sr1xx_dev, unsigned long fl
 	return ret;
 }
 
+static inline struct sr1xx_dev *get_dev_from_rxq(struct rx_queue *rxq)
+{
+	return container_of(rxq, struct sr1xx_dev, rx_queue);
+}
+
+static void rxq_init(struct rx_queue *rxq)
+{
+	memset(rxq, 0, sizeof(*rxq));
+	spin_lock_init(&rxq->lock);
+	init_waitqueue_head(&rxq->wq);
+}
+
+static void rxq_clear(struct rx_queue *rxq)
+{
+	int i;
+
+	spin_lock(&rxq->lock);
+	for (i = 0; i < NR_RX_BUFFERS; i++) {
+		struct rx_buffer *rxbuf = &rxq->buffers[i];
+		if (rxbuf->buff) {
+			kfree(rxbuf->buff);
+			rxbuf->buff = NULL;
+			rxbuf->len = 0;
+		}
+	}
+	rxq->head = 0;
+	rxq->tail = 0;
+	spin_unlock(&rxq->lock);
+}
+
+static void free_one_buffer(struct rx_buffer *rx_buff)
+{
+	if (rx_buff->buff) {
+		kfree(rx_buff->buff);
+		rx_buff->buff = NULL;
+	}
+	rx_buff->len = 0;
+}
+
+static size_t rxq_len(struct rx_queue *rxq)
+{
+	if (rxq->head >= rxq->tail)
+		return rxq->head - rxq->tail;
+	else
+		return NR_RX_BUFFERS - rxq->tail + rxq->head;
+}
+
+static size_t rxq_is_empty(struct rx_queue *rxq)
+{
+	return rxq_len(rxq) == 0;
+}
+
+static int rxq_pop(struct rx_queue *rxq, struct rx_buffer *rx_buff)
+{
+	int ret;
+	struct sr1xx_dev *sr1xx_dev = get_dev_from_rxq(rxq);
+
+	for (;;) {
+		spin_lock(&rxq->lock);
+		if (rxq->head == rxq->tail) {
+			/* Empty */
+			spin_unlock(&rxq->lock);
+			dev_dbg(&sr1xx_dev->spi->dev,
+				"rx ring empty, wait for rx event.\n");
+			ret = wait_event_interruptible(rxq->wq, rxq->head != rxq->tail ||
+						       srflags_test(sr1xx_dev, FLAGS_READ_ABORTED));
+			if (ret)
+				return ret;
+			if (srflags_test(sr1xx_dev, FLAGS_READ_ABORTED)) {
+				return -ESHUTDOWN;
+			}
+		} else {
+			dev_dbg(&sr1xx_dev->spi->dev,
+				"Dequeue rx ring slot %d, %zu bytes\n",
+				rxq->tail, rxq->buffers[rxq->tail].len);
+			memcpy(rx_buff, &rxq->buffers[rxq->tail], sizeof(*rx_buff));
+			rxq->buffers[rxq->tail].buff = NULL;
+			rxq->buffers[rxq->tail].len = 0;
+			rxq->tail = (rxq->tail + 1) % NR_RX_BUFFERS;
+			spin_unlock(&rxq->lock);
+			wake_up_all(&rxq->wq);
+			break;
+		}
+	}
+	return 0;
+}
+
+static int rxq_push(struct rx_queue *rxq, void *buff, size_t len)
+{
+	struct sr1xx_dev *sr1xx_dev = get_dev_from_rxq(rxq);
+	int i, ret, next, retries;
+	void *copied_buff;
+
+	copied_buff = kmalloc(len, GFP_KERNEL);
+	if (!copied_buff) {
+		dev_err(&sr1xx_dev->spi->dev, "Failed to allocate rx buffer %zu bytes.\n", len);
+		return -ENOMEM;
+	}
+	memcpy(copied_buff, buff, len);
+
+	retries = MAX_RETRIES_ON_FULL;
+	while(retries--) {
+		if (srflags_test(sr1xx_dev, FLAGS_READ_ABORTED)) {
+			dev_warn(&sr1xx_dev->spi->dev,
+				 "packet received while aborted\n");
+			kfree(copied_buff);
+			return -ESHUTDOWN;
+		}
+
+		spin_lock(&rxq->lock);
+		next = (rxq->head + 1) % NR_RX_BUFFERS;
+		if (next == rxq->tail) {
+			/* Full */
+			spin_unlock(&rxq->lock);
+			dev_warn(&sr1xx_dev->spi->dev, "RX queue full\n");
+			ret = wait_event_interruptible_timeout(rxq->wq, next != rxq->tail ||
+						srflags_test(sr1xx_dev, FLAGS_READ_ABORTED),
+						FALLBACK_ON_FULL_MS);
+			if (ret <= 0) {
+				dev_err(&sr1xx_dev->spi->dev, "Drop %u packets.\n",
+					NR_DROPS_ON_FULL);
+
+				spin_lock(&rxq->lock);
+				for (i = 0; i < NR_DROPS_ON_FULL; i++) {
+					int tail = rxq->tail;
+					free_one_buffer(&rxq->buffers[tail]);
+					rxq->tail = (tail + 1) % NR_RX_BUFFERS;
+				}
+				spin_unlock(&rxq->lock);
+			}
+		} else {
+			struct rx_buffer *rx_buff = &rxq->buffers[rxq->head];
+
+			rx_buff->buff = copied_buff;
+			rx_buff->len = len;
+			rxq->head = next;
+			dev_dbg(&sr1xx_dev->spi->dev,
+				"Queued a packet to slot %d (%zu bytes), q_len=%zu\n",
+				rxq->head, len, rxq_len(rxq));
+			spin_unlock(&rxq->lock);
+			wake_up_all(&rxq->wq);
+			return 0;
+		}
+	}
+
+	kfree(copied_buff);
+	return -ENOMEM;
+}
+
 /* Spi write/read operation mode */
 enum spi_operation_modes { SR1XX_WRITE_MODE, SR1XX_READ_MODE };
 
@@ -159,6 +325,11 @@ static int sr1xx_dev_open(struct inode *inode, struct file *filp)
 	struct sr1xx_dev *sr1xx_dev = container_of(filp->private_data, struct sr1xx_dev, sr1xx_device);
 
 	filp->private_data = sr1xx_dev;
+	return 0;
+}
+
+static int sr1xx_dev_release(struct inode *inode, struct file *filp)
+{
 	return 0;
 }
 
@@ -289,8 +460,10 @@ static long sr1xx_dev_ioctl(struct file *filp, unsigned int cmd,
 	switch (cmd) {
 	case SR1XX_SET_PWR:
 		if (arg == PWR_ENABLE) {
+			stop_rx_thread(sr1xx_dev);
 			ret = sr1xx_power_ctl(sr1xx_dev, true);
 		} else if (arg == PWR_DISABLE) {
+			stop_rx_thread(sr1xx_dev);
 			ret = sr1xx_power_ctl(sr1xx_dev, false);
 		} else if (arg == PWR_SUSPEND) {
 			sr1xx_suspend_ctl(sr1xx_dev, true);
@@ -298,9 +471,8 @@ static long sr1xx_dev_ioctl(struct file *filp, unsigned int cmd,
 			sr1xx_suspend_ctl(sr1xx_dev, false);
 		} else if (arg == ABORT_READ_PENDING) {
 			dev_info(&sr1xx_dev->spi->dev, "Abort read requested\n");
-			srflags_set(sr1xx_dev, FLAGS_READ_ABORTED);
-			/* Wake up waiting readers */
-			wake_up(&sr1xx_dev->read_wq);
+			/* This will set FLAGS_READ_ABORTED */
+			stop_rx_thread(sr1xx_dev);
 		}
 		break;
 	case SR1XX_SET_FWD:
@@ -310,18 +482,14 @@ static long sr1xx_dev_ioctl(struct file *filp, unsigned int cmd,
 		}
 		else if(arg == 0) {
 			srflags_clear(sr1xx_dev, FLAGS_FW_DOWNLOAD);
+			srflags_clear(sr1xx_dev, FLAGS_READ_ABORTED);
+			ret = start_rx_thread(sr1xx_dev);
 		}
 		break;
 
 	case SR1XX_GET_THROUGHPUT:
 		dev_warn(&sr1xx_dev->spi->dev, "SR1XX_GET_THROUGHPUT not supported!\n");
 		break;
-#if ESE_COLD_RESET
-	case SR1XX_ESE_RESET:
-		dev_info(&sr1xx_dev->spi->dev, "%s SR1XX_ESE_RESET_ Enter\n", __func__);
-		ret = perform_ese_cold_reset(ESE_CLD_RST_OTHER);
-		break;
-#endif
 	default:
 		dev_err(&sr1xx_dev->spi->dev, " Error case");
 		ret = -EINVAL;
@@ -368,175 +536,188 @@ static int sr1xx_wait_irq(struct sr1xx_dev* sr1xx_dev, long timeout_ms)
  * Function to wait till irq gpio goes low state
  *
  */
-static void sr1xx_wait_for_irq_gpio_low(struct sr1xx_dev *sr1xx_dev)
+static int sr1xx_wait_for_irq_gpio_low(struct sr1xx_dev *sr1xx_dev)
 {
 	unsigned long timeout;
 	timeout = jiffies + msecs_to_jiffies(10);
-	do {
+
+	for (;;) {
+		if (!gpio_get_value(sr1xx_dev->irq_gpio))
+			return 0;
+
 		usleep_range(10, 15);
 		if (time_after(jiffies, timeout)) {
-			dev_info(&sr1xx_dev->spi->dev,
-				 "UWBS not released the IRQ even after 10ms");
 			break;
 		}
-	} while (gpio_get_value(sr1xx_dev->irq_gpio));
-}
-
-/**
- * sr1xx_dev_transceive
- * @op_mode indicates write/read operation
- *
- * Write and Read logic implemented under same api with
- * mutex lock protection so write and read synchronized
- *
- * During Uwb ranging sequence(read) need to block write sequence
- * in order to avoid some race condition scenarios.
- *
- * Returns     : Number of bytes write/read if read is success else
- *               indicate each error code
- */
-static int sr1xx_dev_transceive(struct sr1xx_dev *sr1xx_dev, int op_mode,
-				int count)
-{
-	int ret, retry_count;
-	bool is_extended_len_bit_set = false;
-
-	mutex_lock(&sr1xx_dev->sr1xx_access_lock);
-
-	sr1xx_dev->total_bytes_to_read = 0;
-	ret = -EIO;
-	retry_count = 0;
-
-	switch (op_mode) {
-	case SR1XX_WRITE_MODE:
-		sr1xx_dev->write_count = 0;
-		/* UCI Header write */
-		ret = spi_write(sr1xx_dev->spi, sr1xx_dev->tx_buffer,
-				UCI_HEADER_LEN);
-		if (ret < 0) {
-			ret = -EIO;
-			dev_err(&sr1xx_dev->spi->dev,
-				"spi_write header : Failed.\n");
-			goto transceive_end;
-		} else {
-			count -= UCI_HEADER_LEN;
-		}
-		if (count > 0) {
-			/* In between header write and payload write UWBS needs some time */
-			usleep_range(WRITE_DELAY, WRITE_DELAY + WRITE_DELAY_RANGE_DIFF);
-			/* UCI Payload write */
-			ret = spi_write(sr1xx_dev->spi,
-					sr1xx_dev->tx_buffer +
-					UCI_HEADER_LEN, count);
-			if (ret < 0) {
-				ret = -EIO;
-				dev_err(&sr1xx_dev->spi->dev,
-					"spi_write payload : Failed.\n");
-				goto transceive_end;
-			}
-		}
-		sr1xx_dev->write_count = count + UCI_HEADER_LEN;
-		ret = TRANSCEIVE_SUCCESS;
-		break;
-	case SR1XX_READ_MODE:
-		if (!srflags_test(sr1xx_dev, FLAGS_FW_DOWNLOAD) && !gpio_get_value(sr1xx_dev->irq_gpio)) {
-			dev_err(&sr1xx_dev->spi->dev,
-				"IRQ might have gone low due to write ");
-			ret = IRQ_WAIT_REQUEST;
-			goto transceive_end;
-		}
-		gpio_set_value(sr1xx_dev->spi_handshake_gpio, 1);
-		/*
-		 * Goog: skip gpio polling on irq line
-		 * waiting for the 2nd irq assertion after RX_SYNC
-		 */
-		ret = sr1xx_wait_irq(sr1xx_dev, sr1xx_dev->timeout_in_ms);
-		if (ret < 0) {
-			ret = IRQ_WAIT_TIMEOUT;
-			goto transceive_end;
-		}
-		sr1xx_dev->read_count = 0;
-		ret = spi_read(sr1xx_dev->spi, (void *)sr1xx_dev->rx_buffer, UCI_HEADER_LEN);
-		if (ret < 0) {
-			dev_err(&sr1xx_dev->spi->dev, "sr1xx_dev_read: spi read error %d\n ", ret);
-			goto transceive_end;
-		}
-		if ((sr1xx_dev->rx_buffer[0] & UCI_MT_MASK) == 0) {
-			sr1xx_dev->total_bytes_to_read = sr1xx_dev->rx_buffer[UCI_PAYLOAD_LEN_OFFSET];
-			sr1xx_dev->total_bytes_to_read =
-				((sr1xx_dev->total_bytes_to_read << 8) |
-				sr1xx_dev->rx_buffer[UCI_EXT_PAYLOAD_LEN_OFFSET]);
-		} else {
-			is_extended_len_bit_set =
-			    (sr1xx_dev->rx_buffer[UCI_EXT_PAYLOAD_LEN_IND_OFFSET] & UCI_EXT_PAYLOAD_LEN_IND_OFFSET_MASK);
-			sr1xx_dev->total_bytes_to_read = sr1xx_dev->rx_buffer[UCI_PAYLOAD_LEN_OFFSET];
-			if (is_extended_len_bit_set) {
-				sr1xx_dev->total_bytes_to_read =
-				    ((sr1xx_dev->total_bytes_to_read << 8) |
-				     sr1xx_dev->rx_buffer[UCI_EXT_PAYLOAD_LEN_OFFSET]);
-			}
-		}
-		if (sr1xx_dev->total_bytes_to_read > (MAX_UCI_PKT_SIZE - UCI_HEADER_LEN)) {
-			dev_err(&sr1xx_dev->spi->dev, "Length %d  exceeds the max limit %d....",
-				(int)sr1xx_dev->total_bytes_to_read,
-				(int)MAX_UCI_PKT_SIZE);
-			ret = -ENOBUFS;
-			goto transceive_end;
-		}
-		if (sr1xx_dev->total_bytes_to_read > 0) {
-			ret = spi_read(sr1xx_dev->spi,
-				      (void *)(sr1xx_dev->rx_buffer + UCI_HEADER_LEN),
-				      sr1xx_dev->total_bytes_to_read);
-			if (ret < 0) {
-				dev_err(&sr1xx_dev->spi->dev,
-					"sr1xx_dev_read: spi read error.. %d\n ",
-					ret);
-				goto transceive_end;
-			}
-		}
-		sr1xx_dev->read_count = (unsigned int)(sr1xx_dev->total_bytes_to_read + UCI_HEADER_LEN);
-		sr1xx_wait_for_irq_gpio_low(sr1xx_dev);
-		ret = TRANSCEIVE_SUCCESS;
-		gpio_set_value(sr1xx_dev->spi_handshake_gpio, 0);
-		break;
-	default:
-		dev_err(&sr1xx_dev->spi->dev, "invalid operation .....");
-		break;
 	}
-transceive_end:
-	if (op_mode == SR1XX_READ_MODE)
-		gpio_set_value(sr1xx_dev->spi_handshake_gpio, 0);
-
-	mutex_unlock(&sr1xx_dev->sr1xx_access_lock);
-	return ret;
+	return -ETIMEDOUT;
 }
 
-/**
- * sr1xx_hbci_write
- *
- * Used to write hbci(SR1xx BootROM Command Interface) packets
- * during firmware download sequence.
- *
- * Returns: TRANSCEIVE_SUCCESS on success or error code on fail
+/*
+ * thread should be started when FW download mode gets off
  */
-static int sr1xx_hbci_write(struct sr1xx_dev *sr1xx_dev, int count)
+static int sr1xx_rx_thread(void *data)
 {
 	int ret;
+	struct sr1xx_dev *sr1xx_dev = data;
 
-	sr1xx_dev->write_count = 0;
-	/* HBCI write */
-	ret = spi_write(sr1xx_dev->spi, sr1xx_dev->tx_buffer, count);
-	if (ret < 0) {
-		ret = -EIO;
-		dev_err(&sr1xx_dev->spi->dev, "spi_write fw download : Failed.\n");
-		goto hbci_write_fail;
+	dev_info(&sr1xx_dev->spi->dev, "RX thread started.\n");
+
+	if (srflags_test_and_set(sr1xx_dev, FLAGS_RX_RUNNING)) {
+		dev_err(&sr1xx_dev->spi->dev, "RX thread is already running.\n");
+		return -EIO;
 	}
-	sr1xx_dev->write_count = count;
-	ret = TRANSCEIVE_SUCCESS;
-	return ret;
-hbci_write_fail:
-	dev_err(&sr1xx_dev->spi->dev, "%s failed...%d", __func__, ret);
-	return ret;
+
+	while (!kthread_should_stop()) {
+		size_t payload_len;
+		uint8_t *buff = sr1xx_dev->rx_buffer;
+
+		if (srflags_test(sr1xx_dev, FLAGS_FW_DOWNLOAD)) {
+			dev_err(&sr1xx_dev->spi->dev, "RX thread is running while HBCI mode.\n");
+			break;
+		}
+
+		ret = sr1xx_wait_irq(sr1xx_dev, 0);
+		if (ret) {
+			if (ret != -ERESTARTSYS) {
+				dev_err(&sr1xx_dev->spi->dev, "Failed to wait irq ret=%d\n", ret);
+			}
+			continue;
+		}
+
+		if (srflags_test(sr1xx_dev, FLAGS_READ_ABORTED)) {
+			dev_info(&sr1xx_dev->spi->dev, "Read aborted.\n");
+			break;
+		}
+
+		if (!srflags_test(sr1xx_dev, FLAGS_PWR_ENABLED) ||
+		    srflags_test(sr1xx_dev, FLAGS_SUSPENDED)) {
+			dev_warn(&sr1xx_dev->spi->dev, "RX IRQ while power down.\n");
+			break;
+		}
+
+		/* TX/RX lock */
+		if (!mutex_trylock(&sr1xx_dev->sr1xx_access_lock)) {
+			dev_dbg(&sr1xx_dev->spi->dev, "TX/RX contention - wait TX finished.\n");
+			mutex_lock(&sr1xx_dev->sr1xx_access_lock);
+			dev_dbg(&sr1xx_dev->spi->dev, "TX/RX contention - TX finished.\n");
+		}
+
+		if (!gpio_get_value(sr1xx_dev->irq_gpio)) {
+			dev_err(&sr1xx_dev->spi->dev, "IRQ might have gone low due to write.\n");
+			mutex_unlock(&sr1xx_dev->sr1xx_access_lock);
+			continue;
+		}
+		/* RX handshake + wait 2nd IRQ */
+		gpio_set_value(sr1xx_dev->spi_handshake_gpio, 1);
+		ret = sr1xx_wait_irq(sr1xx_dev, sr1xx_dev->timeout_in_ms);
+		if (ret < 0) {
+			dev_err(&sr1xx_dev->spi->dev, "2nd RX IRQ might not asserted.\n");
+			mutex_unlock(&sr1xx_dev->sr1xx_access_lock);
+			continue;
+		}
+
+		/* UCI header */
+		ret = spi_read(sr1xx_dev->spi, buff, UCI_HEADER_LEN);
+		if (ret < 0) {
+			dev_err(&sr1xx_dev->spi->dev, "UCI header read error %d\n ", ret);
+			mutex_unlock(&sr1xx_dev->sr1xx_access_lock);
+			break;
+		}
+
+		if ((sr1xx_dev->rx_buffer[0] & UCI_MT_MASK) == 0) {
+			/* Data packet */
+			payload_len = (buff[UCI_PAYLOAD_LEN_OFFSET] << 8) | buff[UCI_EXT_PAYLOAD_LEN_OFFSET];
+		} else {
+			/* UCI packet */
+			bool is_ext = buff[UCI_EXT_PAYLOAD_LEN_IND_OFFSET] & UCI_EXT_PAYLOAD_LEN_IND_OFFSET_MASK;
+
+			if (is_ext)
+				payload_len = (buff[UCI_PAYLOAD_LEN_OFFSET] << 8) | buff[UCI_EXT_PAYLOAD_LEN_OFFSET];
+			else
+				payload_len = buff[UCI_PAYLOAD_LEN_OFFSET];
+
+			if ((payload_len + UCI_HEADER_LEN) > MAX_UCI_PKT_SIZE) {
+				dev_err(&sr1xx_dev->spi->dev, "UCI too big to receive (payload %zu bytes).\n", payload_len);
+				mutex_unlock(&sr1xx_dev->sr1xx_access_lock);
+				break;
+			}
+
+			ret = spi_read(sr1xx_dev->spi, buff + UCI_HEADER_LEN, payload_len);
+			if (ret < 0) {
+				dev_err(&sr1xx_dev->spi->dev, "UCI payload read error %d (payload=%zu).\n ",
+					ret, payload_len);
+				mutex_unlock(&sr1xx_dev->sr1xx_access_lock);
+				break;
+			}
+
+			ret = sr1xx_wait_for_irq_gpio_low(sr1xx_dev);
+			if (ret) {
+				dev_err(&sr1xx_dev->spi->dev, "UWBS not released the IRQ after RX.\n");
+			}
+
+			gpio_set_value(sr1xx_dev->spi_handshake_gpio, 0);
+
+			mutex_unlock(&sr1xx_dev->sr1xx_access_lock);
+
+			rxq_push(&sr1xx_dev->rx_queue, buff, UCI_HEADER_LEN + payload_len);
+		}
+	}
+
+	gpio_set_value(sr1xx_dev->spi_handshake_gpio, 0);
+
+	rxq_clear(&sr1xx_dev->rx_queue);
+
+	srflags_clear(sr1xx_dev, FLAGS_RX_RUNNING);
+
+	dev_info(&sr1xx_dev->spi->dev, "RX thread stopped.\n");
+
+	return 0;
+}
+
+static int start_rx_thread(struct sr1xx_dev *sr1xx_dev)
+{
+	struct task_struct *thread;
+
+	if (sr1xx_dev->rx_thread) {
+		dev_err(&sr1xx_dev->spi->dev, "Cannot init RX thread, it's alive.\n");
+		return -EIO;
+	}
+
+	if (!rxq_is_empty(&sr1xx_dev->rx_queue)) {
+		dev_warn(&sr1xx_dev->spi->dev, "RX queue was not empty, clear it.\n");
+		rxq_clear(&sr1xx_dev->rx_queue);
+	}
+
+	thread = kthread_run(sr1xx_rx_thread, sr1xx_dev, "sr1xx-rx-thread");
+	if (IS_ERR_OR_NULL(thread)) {
+		dev_err(&sr1xx_dev->spi->dev, "Failed to create rx thread.\n");
+		return PTR_ERR(thread);
+	}
+
+	sr1xx_dev->rx_thread = thread;
+	return 0;
+}
+
+static int stop_rx_thread(struct sr1xx_dev *sr1xx_dev)
+{
+	if (!sr1xx_dev->rx_thread) {
+		return -ENOENT;
+	}
+
+	srflags_set(sr1xx_dev, FLAGS_READ_ABORTED);
+
+	/* wake up from sr1xx_wait_irq() */
+	wake_up(&sr1xx_dev->read_wq);
+
+	/* wake up rxq users */
+	wake_up_all(&sr1xx_dev->rx_queue.wq);
+
+	kthread_stop(sr1xx_dev->rx_thread);
+
+	sr1xx_dev->rx_thread = NULL;
+
+	return 0;
 }
 
 static ssize_t sr1xx_dev_write(struct file *filp, const char *buf, size_t count, loff_t * offset)
@@ -552,25 +733,51 @@ static ssize_t sr1xx_dev_write(struct file *filp, const char *buf, size_t count,
 				srflags_test(sr1xx_dev, FLAGS_SUSPENDED) ? "LPM" : "NPM");
 	}
 
-	if (count > SR1XX_MAX_TX_BUF_SIZE || count > SR1XX_TXBUF_SIZE) {
-		dev_err(&sr1xx_dev->spi->dev, "%s : Write Size Exceeds\n", __func__);
-		ret = -ENOBUFS;
-		goto write_end;
+	if (count < UCI_HEADER_LEN) {
+		dev_err(&sr1xx_dev->spi->dev, "Write Size too small\n");
+		return -ENOBUFS;
 	}
+
+	if (count > SR1XX_MAX_TX_BUF_SIZE || count > SR1XX_TXBUF_SIZE) {
+		dev_err(&sr1xx_dev->spi->dev, "Write Size Exceeds\n");
+		return -ENOBUFS;
+	}
+
 	if (copy_from_user(sr1xx_dev->tx_buffer, buf, count)) {
 		dev_err(&sr1xx_dev->spi->dev, "%s : failed to copy from user space\n", __func__);
 		return -EFAULT;
 	}
-	if (srflags_test(sr1xx_dev, FLAGS_FW_DOWNLOAD))
-		ret = sr1xx_hbci_write(sr1xx_dev, count);
-	else
-		ret = sr1xx_dev_transceive(sr1xx_dev, SR1XX_WRITE_MODE, count);
-	if (ret == TRANSCEIVE_SUCCESS)
-		ret = sr1xx_dev->write_count;
-	else
-		dev_err(&sr1xx_dev->spi->dev, "write failed......");
-write_end:
-	return ret;
+
+	if (srflags_test(sr1xx_dev, FLAGS_FW_DOWNLOAD)) {
+		ret = spi_write(sr1xx_dev->spi, sr1xx_dev->tx_buffer, count);
+		if (ret < 0) {
+			dev_err(&sr1xx_dev->spi->dev, "Failed to write HBCI packet.\n");
+			return ret;
+		}
+	} else {
+		mutex_lock(&sr1xx_dev->sr1xx_access_lock);
+
+		/* Header */
+		ret = spi_write(sr1xx_dev->spi, sr1xx_dev->tx_buffer, UCI_HEADER_LEN);
+		if (ret < 0) {
+			mutex_unlock(&sr1xx_dev->sr1xx_access_lock);
+			dev_err(&sr1xx_dev->spi->dev, "Failed to write UCI header.\n");
+			return ret;
+		}
+
+		/* In between header write and payload write UWBS needs some time */
+		usleep_range(WRITE_DELAY, WRITE_DELAY + WRITE_DELAY_RANGE_DIFF);
+
+		/* Payload */
+		ret = spi_write(sr1xx_dev->spi, sr1xx_dev->tx_buffer + UCI_HEADER_LEN, count - UCI_HEADER_LEN);
+		if (ret < 0) {
+			dev_err(&sr1xx_dev->spi->dev, "Failed to write UCI header.\n");
+		}
+
+		mutex_unlock(&sr1xx_dev->sr1xx_access_lock);
+	}
+
+	return count;
 }
 
 /**
@@ -621,62 +828,44 @@ hbci_fail:
 	return ret;
 }
 
-static ssize_t sr1xx_dev_read(struct file *filp, char *buf, size_t count, loff_t * offset)
+static ssize_t sr1xx_dev_read(struct file *filp, char *buf, size_t count, loff_t *offset)
 {
 	struct sr1xx_dev *sr1xx_dev = filp->private_data;
-	int ret = -EIO;
+	int ret;
+	struct rx_buffer rx_buff;
+	size_t copy_len;
 
 	if (!srflags_test(sr1xx_dev, FLAGS_PWR_ENABLED))
 		return -EIO;
 
-	memset(sr1xx_dev->rx_buffer, 0x00, SR1XX_RXBUF_SIZE);
-
-	/* HBCI packet read */
+	/*
+	 * HBCI packet read
+	 * RX thread should not be running
+	 */
 	if (srflags_test(sr1xx_dev, FLAGS_FW_DOWNLOAD)) {
-		ret = sr1xx_hbci_read(sr1xx_dev, buf, count);
-		goto read_end;
-	}
-	/* UCI packet read */
-	if ((filp->f_flags & O_NONBLOCK) && !srflags_test(sr1xx_dev, FLAGS_IRQ_RECEIVED)) {
-		ret = -EAGAIN;
-		goto read_end;
+		return sr1xx_hbci_read(sr1xx_dev, buf, count);
 	}
 
-	do {
-		if (!srflags_test(sr1xx_dev, FLAGS_READ_ABORTED)) {
-			ret = sr1xx_wait_irq(sr1xx_dev, 0);
-			if (ret && !srflags_test(sr1xx_dev, FLAGS_READ_ABORTED)) {
-				if (ret != -ERESTARTSYS)
-					dev_err(&sr1xx_dev->spi->dev, "wait_event_interruptible() : Failed. %d\n", ret);
-				goto read_end;
-			}
-		}
-		if (srflags_test_and_clear(sr1xx_dev, FLAGS_READ_ABORTED)) {
-			dev_err(&sr1xx_dev->spi->dev, "Abort Read pending......\n");
-			return -EAGAIN;
-		}
-		ret = sr1xx_dev_transceive(sr1xx_dev, SR1XX_READ_MODE, count);
-		if (ret == IRQ_WAIT_REQUEST) {
-			dev_err(&sr1xx_dev->spi->dev,
-				"Irq is low due to write hence irq is requested again...\n");
-		}
-	} while (ret == IRQ_WAIT_REQUEST);
-	if (ret == TRANSCEIVE_SUCCESS) {
-		if (copy_to_user(buf, sr1xx_dev->rx_buffer, sr1xx_dev->read_count)) {
-			dev_err(&sr1xx_dev->spi->dev, "%s: copy to user failed\n", __func__);
-			ret = -EFAULT;
-			goto read_end;
-		}
-		ret = sr1xx_dev->read_count;
-	} else if (ret == IRQ_WAIT_TIMEOUT) {
-		dev_err(&sr1xx_dev->spi->dev, "Second irq is not received..Time out...");
-		ret = -ETIME;
-	} else {
-		dev_err(&sr1xx_dev->spi->dev, "spi read failed...%d", ret);
-		ret = -EIO;
+	/* UCI packet read */
+	if ((filp->f_flags & O_NONBLOCK) && rxq_is_empty(&sr1xx_dev->rx_queue)) {
+		return -EAGAIN;
 	}
-read_end:
-	return ret;
+
+	ret = rxq_pop(&sr1xx_dev->rx_queue, &rx_buff);
+	if (ret < 0) {
+		return ret;
+	}
+
+	/* TODO: check user buffer boundary */
+	copy_len = rx_buff.len;
+
+	if (copy_to_user(buf, rx_buff.buff, copy_len)) {
+		dev_err(&sr1xx_dev->spi->dev, "failed to copy_to_user.\n");
+		copy_len = 0;
+	}
+
+	kfree(rx_buff.buff);
+	return copy_len;
 }
 
 static int sr1xx_hw_setup(struct device *dev,
@@ -766,6 +955,7 @@ static const struct file_operations sr1xx_dev_fops = {
 	.read = sr1xx_dev_read,
 	.write = sr1xx_dev_write,
 	.open = sr1xx_dev_open,
+	.release = sr1xx_dev_release,
 	.unlocked_ioctl = sr1xx_dev_ioctl,
 	.compat_ioctl = sr1xx_dev_ioctl_compat,
 };
@@ -897,6 +1087,8 @@ static int sr1xx_probe(struct spi_device *spi)
 		goto err_misc;
 	}
 
+	rxq_init(&sr1xx_dev->rx_queue);
+
 	sr1xx_dev->spi->irq = gpio_to_irq(sr1xx_dev->irq_gpio);
 	if (sr1xx_dev->spi->irq < 0) {
 		dev_err(&spi->dev, "gpio_to_irq request failed gpio = 0x%x\n", sr1xx_dev->irq_gpio);
@@ -908,8 +1100,8 @@ static int sr1xx_probe(struct spi_device *spi)
 	irq_flags = IRQF_TRIGGER_RISING;
 	sr1xx_dev->timeout_in_ms = 500;
 
-	ret = request_irq(sr1xx_dev->spi->irq, sr1xx_dev_irq_handler, irq_flags,
-			  sr1xx_dev->sr1xx_device.name, sr1xx_dev);
+	ret = devm_request_irq(&spi->dev, sr1xx_dev->spi->irq, sr1xx_dev_irq_handler, irq_flags,
+			       sr1xx_dev->sr1xx_device.name, sr1xx_dev);
 	if (ret) {
 		dev_err(&spi->dev, "request_irq failed\n");
 		goto err_misc;
@@ -951,8 +1143,10 @@ static int sr1xx_remove(struct spi_device *spi)
 		dev_err(&spi->dev, "sr1xx_dev is NULL \n");
 		return -EINVAL;
 	}
+
+	stop_rx_thread(sr1xx_dev);
+
 	mutex_destroy(&sr1xx_dev->sr1xx_access_lock);
-	free_irq(sr1xx_dev->spi->irq, sr1xx_dev);
 
 	regulator_disable(sr1xx_dev->regulator_1v8_rf);
 	regulator_disable(sr1xx_dev->regulator_1v8_dig);
