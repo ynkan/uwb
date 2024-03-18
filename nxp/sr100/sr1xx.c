@@ -530,6 +530,40 @@ static int sr1xx_wait_irq(struct sr1xx_dev* sr1xx_dev, long timeout_ms)
 	return ret;
 }
 
+/*
+ * RX sync signal + wait 2nd IRQ
+ * This should be called after 1st IRQ.
+ */
+static int sr1xx_rx_handshake(struct sr1xx_dev* sr1xx_dev)
+{
+	/*
+	 * Rarely, IRQ could be asserted twice before RXSYNC:
+	 *
+	 *  SPI    __________||||______
+	 *                   _________
+	 * RXSYNC  _________|
+	 *            _    _      ______
+	 * INT     __| |__| |____|
+	 *
+	 *
+	 * In case of that, SPI RX transaction should be delayed after
+	 * 3rd INT signal, otherwise host will see garbages of zeros
+	 * from MISO lines. So here, clear IRQ_RECEIVED flags before RX_SYNC.
+	 */
+	int ret;
+
+	if (srflags_test_and_clear(sr1xx_dev, FLAGS_IRQ_RECEIVED)) {
+		dev_warn(&sr1xx_dev->spi->dev, "RX irq asserted more than once before rx sync\n");
+	}
+
+	gpio_set_value(sr1xx_dev->spi_handshake_gpio, 1);
+	ret = sr1xx_wait_irq(sr1xx_dev, sr1xx_dev->timeout_in_ms);
+	if (ret < 0) {
+		dev_err(&sr1xx_dev->spi->dev, "2nd RX IRQ might not asserted.\n");
+	}
+	return ret;
+}
+
 /**
  * sr1xx_wait_for_irq_gpio_low
  *
@@ -609,10 +643,8 @@ static int sr1xx_rx_thread(void *data)
 			continue;
 		}
 		/* RX handshake + wait 2nd IRQ */
-		gpio_set_value(sr1xx_dev->spi_handshake_gpio, 1);
-		ret = sr1xx_wait_irq(sr1xx_dev, sr1xx_dev->timeout_in_ms);
+		ret = sr1xx_rx_handshake(sr1xx_dev);
 		if (ret < 0) {
-			dev_err(&sr1xx_dev->spi->dev, "2nd RX IRQ might not asserted.\n");
 			mutex_unlock(&sr1xx_dev->sr1xx_access_lock);
 			continue;
 		}
