@@ -32,18 +32,22 @@
 #define SR1XX_RXBUF_SIZE 4200
 #define SR1XX_MAX_TX_BUF_SIZE 4200
 
-#define MAX_RETRY_COUNT_FOR_IRQ_CHECK 100
-#define MAX_RETRY_COUNT_FOR_HANDSHAKE 1000
-
 /* Macro to define SPI clock frequency */
 #define SR1XX_SPI_CLOCK 16000000L
-#define WAKEUP_SRC_TIMEOUT (2000)
 
 /* Maximum UCI packet size supported from the driver */
 #define MAX_UCI_PKT_SIZE 4200
 
-#define WRITE_DELAY 100
-#define WRITE_DELAY_RANGE_DIFF 50
+/*
+ * TX delay between header and payload
+ * XXX: Do we really need this?
+ */
+#define WRITE_DELAY 		100
+#define WRITE_DELAY_RANGE_DIFF	50
+
+/* TX fallback when RX is pending */
+#define WRITE_FALLBACK_DELAY_MS		5
+#define WRITE_FALLBACK_MAX_RETRIES	10
 
 struct sr1xx_spi_platform_data {
 	unsigned int irq_gpio;
@@ -110,7 +114,8 @@ struct sr1xx_dev {
 #define FLAGS_IRQ_RECEIVED	2
 #define FLAGS_PWR_ENABLED	3
 #define FLAGS_SUSPENDED		4
-#define FLAGS_RX_RUNNING	5
+#define FLAGS_RX_THREAD_RUNNING	5
+#define FLAGS_RX_ONGOING	6
 	volatile unsigned long flags;
 
 	enum sr1xx_suspend_mode suspend_mode;
@@ -597,7 +602,7 @@ static int sr1xx_rx_thread(void *data)
 
 	dev_info(&sr1xx_dev->spi->dev, "RX thread started.\n");
 
-	if (srflags_test_and_set(sr1xx_dev, FLAGS_RX_RUNNING)) {
+	if (srflags_test_and_set(sr1xx_dev, FLAGS_RX_THREAD_RUNNING)) {
 		dev_err(&sr1xx_dev->spi->dev, "RX thread is already running.\n");
 		return -EIO;
 	}
@@ -611,6 +616,8 @@ static int sr1xx_rx_thread(void *data)
 			break;
 		}
 
+		/* For RX/TX contention check */
+		srflags_clear(sr1xx_dev, FLAGS_RX_ONGOING);
 		ret = sr1xx_wait_irq(sr1xx_dev, 0);
 		if (ret) {
 			if (ret != -ERESTARTSYS) {
@@ -618,6 +625,7 @@ static int sr1xx_rx_thread(void *data)
 			}
 			continue;
 		}
+		srflags_set(sr1xx_dev, FLAGS_RX_ONGOING);
 
 		if (srflags_test(sr1xx_dev, FLAGS_READ_ABORTED)) {
 			dev_info(&sr1xx_dev->spi->dev, "Read aborted.\n");
@@ -632,9 +640,9 @@ static int sr1xx_rx_thread(void *data)
 
 		/* TX/RX lock */
 		if (!mutex_trylock(&sr1xx_dev->sr1xx_access_lock)) {
-			dev_dbg(&sr1xx_dev->spi->dev, "TX/RX contention - wait TX finished.\n");
+			dev_dbg(&sr1xx_dev->spi->dev, "TX/RX contention - wait TX.\n");
 			mutex_lock(&sr1xx_dev->sr1xx_access_lock);
-			dev_dbg(&sr1xx_dev->spi->dev, "TX/RX contention - TX finished.\n");
+			dev_dbg(&sr1xx_dev->spi->dev, "TX/RX contention - continue RX.\n");
 		}
 
 		if (!gpio_get_value(sr1xx_dev->irq_gpio)) {
@@ -700,7 +708,8 @@ static int sr1xx_rx_thread(void *data)
 
 	rxq_clear(&sr1xx_dev->rx_queue);
 
-	srflags_clear(sr1xx_dev, FLAGS_RX_RUNNING);
+	srflags_clear(sr1xx_dev, FLAGS_RX_ONGOING);
+	srflags_clear(sr1xx_dev, FLAGS_RX_THREAD_RUNNING);
 
 	dev_info(&sr1xx_dev->spi->dev, "RX thread stopped.\n");
 
@@ -787,7 +796,25 @@ static ssize_t sr1xx_dev_write(struct file *filp, const char *buf, size_t count,
 			return ret;
 		}
 	} else {
-		mutex_lock(&sr1xx_dev->sr1xx_access_lock);
+		int retries = WRITE_FALLBACK_MAX_RETRIES;
+		while (retries--) {
+			mutex_lock(&sr1xx_dev->sr1xx_access_lock);
+
+			/*
+			 * To have lower chances of RX/TX race - TX fallback on collision
+			 */
+			if (!srflags_test(sr1xx_dev, FLAGS_IRQ_RECEIVED) &&
+			    !srflags_test(sr1xx_dev, FLAGS_RX_ONGOING)) {
+				break;
+			}
+			dev_dbg(&sr1xx_dev->spi->dev, "TX/RX contention - TX fallback.\n");
+			mutex_unlock(&sr1xx_dev->sr1xx_access_lock);
+			msleep(WRITE_FALLBACK_DELAY_MS);
+		}
+
+		if (retries < 0) {
+			dev_warn(&sr1xx_dev->spi->dev, "TX/RX contention detected from TX side.\n");
+		}
 
 		/* Header */
 		ret = spi_write(sr1xx_dev->spi, sr1xx_dev->tx_buffer, UCI_HEADER_LEN);
@@ -797,7 +824,10 @@ static ssize_t sr1xx_dev_write(struct file *filp, const char *buf, size_t count,
 			return ret;
 		}
 
-		/* In between header write and payload write UWBS needs some time */
+		/*
+		 * XXX: can't we just use one transfer?
+		 * In between header write and payload write UWBS needs some time
+		 */
 		usleep_range(WRITE_DELAY, WRITE_DELAY + WRITE_DELAY_RANGE_DIFF);
 
 		/* Payload */
@@ -806,9 +836,12 @@ static ssize_t sr1xx_dev_write(struct file *filp, const char *buf, size_t count,
 			dev_err(&sr1xx_dev->spi->dev, "Failed to write UCI header.\n");
 		}
 
+		if (srflags_test(sr1xx_dev, FLAGS_IRQ_RECEIVED) ||
+		    srflags_test(sr1xx_dev, FLAGS_RX_ONGOING)) {
+			dev_dbg(&sr1xx_dev->spi->dev, "TX/RX contention detected on TX side.\n");
+		}
 		mutex_unlock(&sr1xx_dev->sr1xx_access_lock);
 	}
-
 	return count;
 }
 
