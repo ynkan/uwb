@@ -1135,6 +1135,9 @@ static int sr1xx_probe(struct spi_device *spi)
 	/* Goog: start with hard power down mode */
 	gpio_set_value(sr1xx_dev->ce_gpio, 0);
 
+	/* Default suspend mode = ALL LDOs LPM */
+	sr1xx_dev->suspend_mode = SR1XX_SUSPEND_ALL_LPM;
+
 	/* init mutex and queues */
 	init_waitqueue_head(&sr1xx_dev->read_wq);
 	mutex_init(&sr1xx_dev->sr1xx_access_lock);
