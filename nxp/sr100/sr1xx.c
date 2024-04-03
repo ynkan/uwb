@@ -921,8 +921,13 @@ static ssize_t sr1xx_dev_read(struct file *filp, char *buf, size_t count, loff_t
 		return ret;
 	}
 
-	/* TODO: check user buffer boundary */
-	copy_len = rx_buff.len;
+	if (count < rx_buff.len) {
+		dev_err(&sr1xx_dev->spi->dev, "User rx buffer size(%zu) is not enough (packet=%zu), trim it.\n",
+				count, rx_buff.len);
+		copy_len = count;
+	} else {
+		copy_len = rx_buff.len;
+	}
 
 	if (copy_to_user(buf, rx_buff.buff, copy_len)) {
 		dev_err(&sr1xx_dev->spi->dev, "failed to copy_to_user.\n");
