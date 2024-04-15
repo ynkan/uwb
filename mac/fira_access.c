@@ -103,7 +103,7 @@ static void fira_access_setup_frame(struct fira_local *local,
 	bool is_first_frame = slot->message_id == FIRA_MESSAGE_ID_CONTROL;
 	bool request_rssi = session->params.report_rssi;
 	if (is_rframe) {
-		fira_sts_get_sts_params(session, slot->index, sts_params->v,
+		fira_sts_get_sts_params(session, slot, sts_params->v,
 					sizeof(sts_params->v), sts_params->key,
 					sizeof(sts_params->key));
 		sts_params->n_segs = params->number_of_sts_segments;
@@ -242,7 +242,8 @@ static bool fira_rx_sts_good(struct fira_local *local,
 	return true;
 }
 
-static void fira_ranging_info_set_status(struct fira_ranging_info *ranging_info,
+static void fira_ranging_info_set_status(const struct fira_session *session,
+					 struct fira_ranging_info *ranging_info,
 					 enum fira_ranging_status status,
 					 u8 slot_index)
 {
@@ -251,6 +252,7 @@ static void fira_ranging_info_set_status(struct fira_ranging_info *ranging_info,
 		return;
 	ranging_info->status = status;
 	ranging_info->slot_index = slot_index;
+	fira_session_set_range_data_ntf_status(session, ranging_info);
 }
 
 static void
@@ -417,15 +419,15 @@ static void fira_rx_frame_ranging(struct fira_local *local,
 
 	if (!fira_rx_sts_good(local, info)) {
 		fira_ranging_info_set_status(
-			ranging_info, FIRA_STATUS_RANGING_RX_PHY_STS_FAILED,
-			slot->index);
+			session, ranging_info,
+			FIRA_STATUS_RANGING_RX_PHY_STS_FAILED, slot->index);
 		return;
 	}
 
 	if (!(info->flags & MCPS802154_RX_FRAME_INFO_TIMESTAMP_RCTU)) {
 		fira_ranging_info_set_status(
-			ranging_info, FIRA_STATUS_RANGING_RX_PHY_TOA_FAILED,
-			slot->index);
+			session, ranging_info,
+			FIRA_STATUS_RANGING_RX_PHY_TOA_FAILED, slot->index);
 		return;
 	}
 	ranging_info->timestamps_rctu[slot->message_id] = info->timestamp_rctu;
@@ -509,7 +511,7 @@ static void fira_rx_frame_ranging(struct fira_local *local,
 		    !fira_frame_rframe_payload_check(local, slot, skb,
 						     &ie_get)) {
 			fira_ranging_info_set_status(
-				ranging_info,
+				session, ranging_info,
 				FIRA_STATUS_RANGING_RX_MAC_IE_DEC_FAILED,
 				slot->index);
 		}
@@ -539,7 +541,8 @@ static void fira_rx_frame_control(struct fira_local *local,
 
 	if (!(info->flags & MCPS802154_RX_FRAME_INFO_TIMESTAMP_DTU)) {
 		fira_ranging_info_set_status(
-			ri, FIRA_STATUS_RANGING_RX_PHY_DEC_FAILED, slot->index);
+			local->current_session, ri,
+			FIRA_STATUS_RANGING_RX_PHY_DEC_FAILED, slot->index);
 		return;
 	}
 
@@ -563,8 +566,7 @@ static void fira_rx_frame_control(struct fira_local *local,
 					       slot->controlee->short_addr;
 
 	/* Continue to decode the frame. */
-	r = fira_sts_decrypt_frame(session, skb, header_len, src_short_addr,
-				   slot->index);
+	r = fira_sts_decrypt_frame(session, slot, skb, header_len, src_short_addr);
 	if (r)
 		goto failed;
 	r = fira_frame_control_payload_check(local, skb, &ie_get, &n_slots,
@@ -576,7 +578,11 @@ static void fira_rx_frame_control(struct fira_local *local,
 	left_duration_dtu =
 		access->duration_dtu - offset_in_access_duration_dtu;
 
-	if (left_duration_dtu < n_slots * params->slot_duration_dtu ||
+	/*
+	 * The RCM has been received, remaining slots are: n_slots - 1.
+	 * Stop if no time left to finish the ranging or if asked to.
+	 */
+	if (left_duration_dtu < (n_slots - 1) * params->slot_duration_dtu ||
 	    session->stop_inband) {
 		n_slots = 1;
 	} else {
@@ -613,11 +619,32 @@ static void fira_rx_frame_control(struct fira_local *local,
 	return;
 
 failed:
+	session = local->current_session;
 	params = &local->current_session->params;
 	access->duration_dtu =
 		offset_in_access_duration_dtu + params->slot_duration_dtu;
-	fira_ranging_info_set_status(
-		ri, FIRA_STATUS_RANGING_RX_MAC_IE_DEC_FAILED, slot->index);
+	fira_ranging_info_set_status(session, ri,
+				     FIRA_STATUS_RANGING_RX_MAC_IE_DEC_FAILED,
+				     slot->index);
+}
+
+static void
+fira_rx_frame_control_update(struct fira_local *local,
+			     const struct fira_slot *slot, struct sk_buff *skb,
+			     const struct mcps802154_rx_frame_info *info)
+{
+	struct fira_ranging_info *ranging_info =
+		&local->ranging_info[slot->ranging_index];
+	struct mcps802154_ie_get_context ie_get = {};
+
+	if (fira_frame_header_check_decrypt(local, slot, skb, &ie_get))
+		goto failed;
+
+	return;
+failed:
+	fira_ranging_info_set_status(local->current_session, ranging_info,
+				     FIRA_STATUS_RANGING_RX_MAC_IE_DEC_FAILED,
+				     slot->index);
 }
 
 static void fira_rx_frame_measurement_report(
@@ -637,7 +664,7 @@ static void fira_rx_frame_measurement_report(
 
 	return;
 failed:
-	fira_ranging_info_set_status(ranging_info,
+	fira_ranging_info_set_status(local->current_session, ranging_info,
 				     FIRA_STATUS_RANGING_RX_MAC_IE_DEC_FAILED,
 				     slot->index);
 }
@@ -659,12 +686,13 @@ fira_rx_frame_result_report(struct fira_local *local,
 
 	return;
 failed:
-	fira_ranging_info_set_status(ranging_info,
+	fira_ranging_info_set_status(local->current_session, ranging_info,
 				     FIRA_STATUS_RANGING_RX_MAC_IE_DEC_FAILED,
 				     slot->index);
 }
 
-static bool fira_do_process_rx_frame(enum mcps802154_rx_error_type error,
+static bool fira_do_process_rx_frame(const struct fira_session *session,
+				     enum mcps802154_rx_error_type error,
 				     struct fira_ranging_info *ranging_info,
 				     u8 slot_index)
 {
@@ -688,7 +716,7 @@ static bool fira_do_process_rx_frame(enum mcps802154_rx_error_type error,
 		status = FIRA_STATUS_RANGING_RX_PHY_DEC_FAILED;
 		break;
 	}
-	fira_ranging_info_set_status(ranging_info, status, slot_index);
+	fira_ranging_info_set_status(session, ranging_info, status, slot_index);
 	return false;
 }
 
@@ -709,10 +737,15 @@ static void fira_rx_frame(struct mcps802154_access *access, int frame_idx,
 				   error);
 
 	if (info && info->flags & MCPS802154_RX_FRAME_INFO_RSSI) {
+		if ((ri->n_rx_rssis + 1) > FIRA_MESSAGE_ID_MAX)
+			return;
+
 		ri->rx_rssis[ri->n_rx_rssis++] =
 			info->rssi < FIRA_RSSI_MAX ? info->rssi : FIRA_RSSI_MAX;
 	}
-	if (fira_do_process_rx_frame(error, ri, slot->index)) {
+
+	if (fira_do_process_rx_frame(local->current_session, error, ri,
+				     slot->index)) {
 		switch (slot->message_id) {
 		case FIRA_MESSAGE_ID_RANGING_INITIATION:
 		case FIRA_MESSAGE_ID_RANGING_RESPONSE:
@@ -730,6 +763,7 @@ static void fira_rx_frame(struct mcps802154_access *access, int frame_idx,
 			fira_rx_frame_result_report(local, slot, skb, info);
 			break;
 		case FIRA_MESSAGE_ID_CONTROL_UPDATE:
+			fira_rx_frame_control_update(local, slot, skb, info);
 			break;
 		default:
 			WARN_UNREACHABLE_DEFAULT();
@@ -809,8 +843,8 @@ static struct sk_buff *fira_tx_get_frame(struct mcps802154_access *access,
 	header_len = mcps802154_ie_put_end(skb, false);
 	WARN_ON(header_len < 0);
 
-	if (fira_sts_encrypt_frame(local->current_session, skb, header_len,
-				   local->src_short_addr, slot->index)) {
+	if (fira_sts_encrypt_frame(local->current_session, slot, skb, header_len,
+				   local->src_short_addr)) {
 		kfree_skb(skb);
 		return NULL;
 	}

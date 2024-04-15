@@ -254,7 +254,7 @@ static void forward_to_next_ranging(struct fira_session *session, int n_ranging)
 }
 
 /**
- * ranging_round_done() - Update controlee and notify the upper layer.
+ * ranging_round_done() - Update controlee and notify the upper layer and rotate crypto keys.
  * @local: FiRa context.
  * @session: Session context.
  * @report_info: Report information to forward fira_session_report.
@@ -346,9 +346,12 @@ fira_session_fsm_active_check_parameters(const struct fira_session *session,
 		case FIRA_SESSION_PARAM_ATTR_MEASUREMENT_SEQUENCE:
 		case FIRA_SESSION_PARAM_ATTR_DATA_PAYLOAD:
 		case FIRA_SESSION_PARAM_ATTR_RANGE_DATA_NTF_CONFIG:
-		case FIRA_SESSION_PARAM_ATTR_RANGE_DATA_NTF_PROXIMITY_NEAR:
-		case FIRA_SESSION_PARAM_ATTR_RANGE_DATA_NTF_PROXIMITY_FAR:
-			/* Allowed for all device type. */
+		case FIRA_SESSION_PARAM_ATTR_RANGE_DATA_NTF_PROXIMITY_NEAR_MM:
+		case FIRA_SESSION_PARAM_ATTR_RANGE_DATA_NTF_PROXIMITY_FAR_MM:
+		case FIRA_SESSION_PARAM_ATTR_RANGE_DATA_NTF_LOWER_BOUND_AOA_AZIMUTH_2PI:
+		case FIRA_SESSION_PARAM_ATTR_RANGE_DATA_NTF_UPPER_BOUND_AOA_AZIMUTH_2PI:
+		case FIRA_SESSION_PARAM_ATTR_RANGE_DATA_NTF_LOWER_BOUND_AOA_ELEVATION_2PI:
+		case FIRA_SESSION_PARAM_ATTR_RANGE_DATA_NTF_UPPER_BOUND_AOA_ELEVATION_2PI:					/* Allowed for all device type. */
 			break;
 		case FIRA_SESSION_PARAM_ATTR_BLOCK_STRIDE_LENGTH:
 			/* Allowed only for controller. */
@@ -619,7 +622,7 @@ fira_session_fsm_active_get_demand(const struct fira_local *local,
 				 * the past of next_timestamp_dtu.
 				 */
 				margin_less =
-					next_timestamp_dtu - timestamp_dtu;
+					timestamp_dtu - next_timestamp_dtu;
 			timestamp_dtu -= margin_less;
 			rx_timeout_dtu = margin_less + margin_more;
 			duration_dtu = round_duration_dtu + margin_less;
