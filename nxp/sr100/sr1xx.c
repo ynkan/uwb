@@ -754,7 +754,12 @@ static int stop_rx_thread(struct sr1xx_dev *sr1xx_dev)
 	/* wake up rxq users */
 	wake_up_all(&sr1xx_dev->rx_queue.wq);
 
-	kthread_stop(sr1xx_dev->rx_thread);
+	if (srflags_test(sr1xx_dev, FLAGS_RX_THREAD_RUNNING)) {
+		dev_info(&sr1xx_dev->spi->dev, "RX thread stop.\n");
+		kthread_stop(sr1xx_dev->rx_thread);
+	} else {
+		dev_info(&sr1xx_dev->spi->dev, "RX thread has already stopped.\n");
+	}
 
 	sr1xx_dev->rx_thread = NULL;
 
