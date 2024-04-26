@@ -114,8 +114,7 @@ struct sr1xx_dev {
 #define FLAGS_IRQ_RECEIVED	2
 #define FLAGS_PWR_ENABLED	3
 #define FLAGS_SUSPENDED		4
-#define FLAGS_RX_THREAD_RUNNING	5
-#define FLAGS_RX_ONGOING	6
+#define FLAGS_RX_ONGOING	5
 	volatile unsigned long flags;
 
 	enum sr1xx_suspend_mode suspend_mode;
@@ -335,6 +334,10 @@ static int sr1xx_dev_open(struct inode *inode, struct file *filp)
 
 static int sr1xx_dev_release(struct inode *inode, struct file *filp)
 {
+	struct sr1xx_dev *sr1xx_dev = filp->private_data;
+
+	stop_rx_thread(sr1xx_dev);
+
 	return 0;
 }
 
@@ -482,13 +485,21 @@ static long sr1xx_dev_ioctl(struct file *filp, unsigned int cmd,
 		break;
 	case SR1XX_SET_FWD:
 		if (arg == 1) {
-			srflags_set(sr1xx_dev, FLAGS_FW_DOWNLOAD);
-			srflags_clear(sr1xx_dev, FLAGS_READ_ABORTED);
+			if (!srflags_test_and_set(sr1xx_dev, FLAGS_FW_DOWNLOAD)) {
+				srflags_clear(sr1xx_dev, FLAGS_READ_ABORTED);
+			} else {
+				dev_warn(&sr1xx_dev->spi->dev,
+					 "FW download mode already set.\n");
+			}
 		}
 		else if(arg == 0) {
-			srflags_clear(sr1xx_dev, FLAGS_FW_DOWNLOAD);
-			srflags_clear(sr1xx_dev, FLAGS_READ_ABORTED);
-			ret = start_rx_thread(sr1xx_dev);
+			if (srflags_test_and_clear(sr1xx_dev, FLAGS_FW_DOWNLOAD)) {
+				srflags_clear(sr1xx_dev, FLAGS_READ_ABORTED);
+				ret = start_rx_thread(sr1xx_dev);
+			} else {
+				dev_warn(&sr1xx_dev->spi->dev,
+					 "FW download mode already cleared.\n");
+			}
 		}
 		break;
 
@@ -602,14 +613,11 @@ static int sr1xx_rx_thread(void *data)
 
 	dev_info(&sr1xx_dev->spi->dev, "RX thread started.\n");
 
-	if (srflags_test_and_set(sr1xx_dev, FLAGS_RX_THREAD_RUNNING)) {
-		dev_err(&sr1xx_dev->spi->dev, "RX thread is already running.\n");
-		return -EIO;
-	}
-
-	while (!kthread_should_stop()) {
+	while (1) {
 		size_t payload_len;
 		uint8_t *buff = sr1xx_dev->rx_buffer;
+
+		gpio_set_value(sr1xx_dev->spi_handshake_gpio, 0);
 
 		if (srflags_test(sr1xx_dev, FLAGS_FW_DOWNLOAD)) {
 			dev_err(&sr1xx_dev->spi->dev, "RX thread is running while HBCI mode.\n");
@@ -634,7 +642,7 @@ static int sr1xx_rx_thread(void *data)
 
 		if (!srflags_test(sr1xx_dev, FLAGS_PWR_ENABLED) ||
 		    srflags_test(sr1xx_dev, FLAGS_SUSPENDED)) {
-			dev_warn(&sr1xx_dev->spi->dev, "RX IRQ while power down.\n");
+			dev_err(&sr1xx_dev->spi->dev, "RX IRQ while power down.\n");
 			break;
 		}
 
@@ -650,6 +658,7 @@ static int sr1xx_rx_thread(void *data)
 			mutex_unlock(&sr1xx_dev->sr1xx_access_lock);
 			continue;
 		}
+
 		/* RX handshake + wait 2nd IRQ */
 		ret = sr1xx_rx_handshake(sr1xx_dev);
 		if (ret < 0) {
@@ -662,7 +671,7 @@ static int sr1xx_rx_thread(void *data)
 		if (ret < 0) {
 			dev_err(&sr1xx_dev->spi->dev, "UCI header read error %d\n ", ret);
 			mutex_unlock(&sr1xx_dev->sr1xx_access_lock);
-			break;
+			continue;
 		}
 
 		if ((sr1xx_dev->rx_buffer[0] & UCI_MT_MASK) == 0) {
@@ -680,7 +689,7 @@ static int sr1xx_rx_thread(void *data)
 			if ((payload_len + UCI_HEADER_LEN) > MAX_UCI_PKT_SIZE) {
 				dev_err(&sr1xx_dev->spi->dev, "UCI too big to receive (payload %zu bytes).\n", payload_len);
 				mutex_unlock(&sr1xx_dev->sr1xx_access_lock);
-				break;
+				continue;
 			}
 
 			ret = spi_read(sr1xx_dev->spi, buff + UCI_HEADER_LEN, payload_len);
@@ -688,7 +697,7 @@ static int sr1xx_rx_thread(void *data)
 				dev_err(&sr1xx_dev->spi->dev, "UCI payload read error %d (payload=%zu).\n ",
 					ret, payload_len);
 				mutex_unlock(&sr1xx_dev->sr1xx_access_lock);
-				break;
+				continue;
 			}
 
 			ret = sr1xx_wait_for_irq_gpio_low(sr1xx_dev);
@@ -696,20 +705,23 @@ static int sr1xx_rx_thread(void *data)
 				dev_err(&sr1xx_dev->spi->dev, "UWBS not released the IRQ after RX.\n");
 			}
 
-			gpio_set_value(sr1xx_dev->spi_handshake_gpio, 0);
-
-			mutex_unlock(&sr1xx_dev->sr1xx_access_lock);
-
 			rxq_push(&sr1xx_dev->rx_queue, buff, UCI_HEADER_LEN + payload_len);
 		}
-	}
+		mutex_unlock(&sr1xx_dev->sr1xx_access_lock);
+	} /* end of loop */
 
 	gpio_set_value(sr1xx_dev->spi_handshake_gpio, 0);
 
 	rxq_clear(&sr1xx_dev->rx_queue);
 
 	srflags_clear(sr1xx_dev, FLAGS_RX_ONGOING);
-	srflags_clear(sr1xx_dev, FLAGS_RX_THREAD_RUNNING);
+
+	/* kthread_stop() should be called */
+	while (!kthread_should_stop()) {
+		set_current_state(TASK_INTERRUPTIBLE);
+		schedule();
+	}
+	set_current_state(TASK_RUNNING);
 
 	dev_info(&sr1xx_dev->spi->dev, "RX thread stopped.\n");
 
@@ -737,14 +749,18 @@ static int start_rx_thread(struct sr1xx_dev *sr1xx_dev)
 	}
 
 	sr1xx_dev->rx_thread = thread;
+
 	return 0;
 }
 
 static int stop_rx_thread(struct sr1xx_dev *sr1xx_dev)
 {
 	if (!sr1xx_dev->rx_thread) {
+		dev_info(&sr1xx_dev->spi->dev, "RX thread has already stopped.\n");
 		return -ENOENT;
 	}
+
+	dev_info(&sr1xx_dev->spi->dev, "Stopping RX thread.\n");
 
 	srflags_set(sr1xx_dev, FLAGS_READ_ABORTED);
 
@@ -754,12 +770,7 @@ static int stop_rx_thread(struct sr1xx_dev *sr1xx_dev)
 	/* wake up rxq users */
 	wake_up_all(&sr1xx_dev->rx_queue.wq);
 
-	if (srflags_test(sr1xx_dev, FLAGS_RX_THREAD_RUNNING)) {
-		dev_info(&sr1xx_dev->spi->dev, "RX thread stop.\n");
-		kthread_stop(sr1xx_dev->rx_thread);
-	} else {
-		dev_info(&sr1xx_dev->spi->dev, "RX thread has already stopped.\n");
-	}
+	kthread_stop(sr1xx_dev->rx_thread);
 
 	sr1xx_dev->rx_thread = NULL;
 
