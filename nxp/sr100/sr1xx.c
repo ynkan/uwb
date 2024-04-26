@@ -14,6 +14,7 @@
 #include <linux/miscdevice.h>
 #include <linux/module.h>
 #include <linux/of_gpio.h>
+#include <linux/pm_qos.h>
 #include <linux/regulator/consumer.h>
 #include <linux/spi/spi.h>
 #include <linux/uaccess.h>
@@ -115,9 +116,12 @@ struct sr1xx_dev {
 #define FLAGS_PWR_ENABLED	3
 #define FLAGS_SUSPENDED		4
 #define FLAGS_RX_ONGOING	5
+#define FLAGS_QOS_APPLIED	6
 	volatile unsigned long flags;
 
 	enum sr1xx_suspend_mode suspend_mode;
+
+	struct pm_qos_request qos_latency;
 
 	struct regulator	*regulator_1v8_dig;
 	struct regulator	*regulator_1v8_rf;
@@ -321,6 +325,27 @@ static int rxq_push(struct rx_queue *rxq, void *buff, size_t len)
 	return -ENOMEM;
 }
 
+static void sr1xx_fw_latency_qos(struct sr1xx_dev *sr1xx_dev, bool on)
+{
+	if (on) {
+		/*
+		 * FW download involves many spi transactions.
+		 * turn off C-states during FW download (around 500ms)
+		 * to shorten the time.
+		 */
+		if (!srflags_test_and_set(sr1xx_dev, FLAGS_QOS_APPLIED)) {
+			memset(&sr1xx_dev->qos_latency, 0, sizeof(sr1xx_dev->qos_latency));
+			cpu_latency_qos_add_request(&sr1xx_dev->qos_latency, 0);
+			pr_info("cpu latency pm qos applied.");
+		}
+	} else {
+		if (srflags_test_and_clear(sr1xx_dev, FLAGS_QOS_APPLIED)) {
+			pr_info("cpu latency pm qos removed.");
+			cpu_latency_qos_remove_request(&sr1xx_dev->qos_latency);
+		}
+	}
+}
+
 /* Spi write/read operation mode */
 enum spi_operation_modes { SR1XX_WRITE_MODE, SR1XX_READ_MODE };
 
@@ -337,6 +362,8 @@ static int sr1xx_dev_release(struct inode *inode, struct file *filp)
 	struct sr1xx_dev *sr1xx_dev = filp->private_data;
 
 	stop_rx_thread(sr1xx_dev);
+
+	sr1xx_fw_latency_qos(sr1xx_dev, false);
 
 	return 0;
 }
@@ -489,6 +516,7 @@ static long sr1xx_dev_ioctl(struct file *filp, unsigned int cmd,
 		if (arg == 1) {
 			if (!srflags_test_and_set(sr1xx_dev, FLAGS_FW_DOWNLOAD)) {
 				srflags_clear(sr1xx_dev, FLAGS_READ_ABORTED);
+				sr1xx_fw_latency_qos(sr1xx_dev, true);
 			} else {
 				dev_warn(&sr1xx_dev->spi->dev,
 					 "FW download mode already set.\n");
@@ -497,6 +525,7 @@ static long sr1xx_dev_ioctl(struct file *filp, unsigned int cmd,
 		else if(arg == 0) {
 			if (srflags_test_and_clear(sr1xx_dev, FLAGS_FW_DOWNLOAD)) {
 				srflags_clear(sr1xx_dev, FLAGS_READ_ABORTED);
+				sr1xx_fw_latency_qos(sr1xx_dev, false);
 				ret = start_rx_thread(sr1xx_dev);
 			} else {
 				dev_warn(&sr1xx_dev->spi->dev,
