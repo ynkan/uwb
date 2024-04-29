@@ -345,6 +345,8 @@ static irqreturn_t sr1xx_dev_irq_handler(int irq, void *dev_id)
 {
 	struct sr1xx_dev *sr1xx_dev = dev_id;
 
+	pm_wakeup_dev_event(&sr1xx_dev->spi->dev, 500, true);
+
 	srflags_set(sr1xx_dev, FLAGS_IRQ_RECEIVED);
 
 	/* Wake up waiting readers */
@@ -795,6 +797,9 @@ static ssize_t sr1xx_dev_write(struct file *filp, const char *buf, size_t count,
 		return -ENOBUFS;
 	}
 
+	/* CMD/RSP turnaround max = 800ms */
+	pm_wakeup_dev_event(&sr1xx_dev->spi->dev, 1 * MSEC_PER_SEC, true);
+
 	if (count > SR1XX_MAX_TX_BUF_SIZE || count > SR1XX_TXBUF_SIZE) {
 		dev_err(&sr1xx_dev->spi->dev, "Write Size Exceeds\n");
 		return -ENOBUFS;
@@ -1025,11 +1030,6 @@ fail_gpio:
 	return ret;
 }
 
-static inline void sr1xx_set_data(struct spi_device *spi, void *data)
-{
-	dev_set_drvdata(&spi->dev, data);
-}
-
 static inline void *sr1xx_get_data(const struct spi_device *spi)
 {
 	return dev_get_drvdata(&spi->dev);
@@ -1207,6 +1207,8 @@ static int sr1xx_probe(struct spi_device *spi)
 		goto err_regulator;
 	}
 
+	device_init_wakeup(&spi->dev, true);
+
 	return 0;
 err_regulator:
 	regulator_disable(sr1xx_dev->regulator_1v8_dig);
@@ -1259,8 +1261,10 @@ int sr1xx_dev_suspend(struct device *dev)
 {
 	struct sr1xx_dev *sr1xx_dev = dev_get_drvdata(dev);
 
-	if (device_may_wakeup(dev))
-		disable_irq_wake(sr1xx_dev->spi->irq);
+	if (device_may_wakeup(dev)) {
+		enable_irq_wake(sr1xx_dev->spi->irq);
+		disable_irq(sr1xx_dev->spi->irq);
+	}
 	return 0;
 }
 
@@ -1274,8 +1278,10 @@ int sr1xx_dev_resume(struct device *dev)
 {
 	struct sr1xx_dev *sr1xx_dev = dev_get_drvdata(dev);
 
-	if (device_may_wakeup(dev))
-		enable_irq_wake(sr1xx_dev->spi->irq);
+	if (device_may_wakeup(dev)) {
+		disable_irq_wake(sr1xx_dev->spi->irq);
+		enable_irq(sr1xx_dev->spi->irq);
+	}
 
 	return 0;
 }
