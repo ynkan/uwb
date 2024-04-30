@@ -123,7 +123,7 @@ static int dw3000_spi_probe(struct spi_device *spi)
 	dev_info(dw->dev, "setup mode: %d, %u bits/w, %u Hz max\n",
 		 (int)(spi->mode & (SPI_CPOL | SPI_CPHA)), spi->bits_per_word,
 		 spi->max_speed_hz);
-	dev_info(dw->dev, "can_dma: %d\n", spi->master->can_dma != NULL);
+	dev_info(dw->dev, "can_dma: %d\n", spi->controller->can_dma != NULL);
 	spi->bits_per_word = 8;
 #if (KERNEL_VERSION(5, 3, 0) <= LINUX_VERSION_CODE)
 	spi->rt = 1;
