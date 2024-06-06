@@ -7,10 +7,7 @@ kernel_module(
     srcs = glob([
         "**/*.c",
         "**/*.h",
-        "Kbuild",
-        "net/mcps802154/Kbuild",
-        "drivers/net/ieee802154/Kbuild",
-        "drivers/spi/Kbuild",
+        "**/Kbuild",
     ]),
     outs = [
         "drivers/net/ieee802154/dw3000.ko",
