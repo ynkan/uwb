@@ -665,7 +665,7 @@ struct dw3000 {
 	/* SPI controller power-management */
 	bool has_lock_pm;
 	/* Control GPIOs */
-	int reset_gpio;
+	struct gpio_desc *reset_gpio;
 	/* Regulators handler  */
 	struct dw3000_power_control regulators;
 	bool is_powered;

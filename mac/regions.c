@@ -179,16 +179,6 @@ int mcps802154_region_get_demand(struct mcps802154_llhw *llhw,
 }
 EXPORT_SYMBOL_GPL(mcps802154_region_get_demand);
 
-void mcps802154_region_xmit_resume(struct mcps802154_llhw *llhw,
-				   struct mcps802154_region *region,
-				   int queue_index)
-{
-	struct mcps802154_local *local = llhw_to_local(llhw);
-
-	ieee802154_wake_queue(local->hw);
-}
-EXPORT_SYMBOL_GPL(mcps802154_region_xmit_resume);
-
 void mcps802154_region_xmit_done(struct mcps802154_llhw *llhw,
 				 struct mcps802154_region *region,
 				 struct sk_buff *skb, bool ok)

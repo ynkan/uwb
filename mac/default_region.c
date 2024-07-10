@@ -31,11 +31,6 @@
 #include "default_region.h"
 #include "warn_return.h"
 
-/**
- * MCPS802154_DEFAULT_REGION_QUEUE_SIZE - number of buffers in the queue.
- */
-#define MCPS802154_DEFAULT_REGION_QUEUE_SIZE 2
-
 static struct mcps802154_region_ops default_region_ops;
 
 static void
@@ -74,7 +69,6 @@ mcps802154_default_tx_return(struct mcps802154_access *access, int frame_idx,
 			local->retries = 0;
 			mcps802154_region_xmit_done(local->llhw, &local->region,
 						    skb, false);
-			atomic_dec(&local->n_queued);
 		}
 	} else if (reason == MCPS802154_ACCESS_TX_RETURN_REASON_CANCEL) {
 		skb_queue_head(&local->queue, skb);
@@ -82,7 +76,6 @@ mcps802154_default_tx_return(struct mcps802154_access *access, int frame_idx,
 		local->retries = 0;
 		mcps802154_region_xmit_done(local->llhw, &local->region, skb,
 					    true);
-		atomic_dec(&local->n_queued);
 	}
 }
 
@@ -104,7 +97,6 @@ mcps802154_default_open(struct mcps802154_llhw *llhw)
 	local->llhw = llhw;
 	local->region.ops = &default_region_ops;
 	skb_queue_head_init(&local->queue);
-	atomic_set(&local->n_queued, 0);
 	local->retries = 0;
 	return &local->region;
 }
@@ -114,7 +106,6 @@ static void mcps802154_default_close(struct mcps802154_region *region)
 	struct default_local *local = region_to_local(region);
 
 	skb_queue_purge(&local->queue);
-	atomic_set(&local->n_queued, 0);
 	kfree(local);
 }
 
@@ -123,7 +114,6 @@ static void mcps802154_default_notify_stop(struct mcps802154_region *region)
 	struct default_local *local = region_to_local(region);
 
 	skb_queue_purge(&local->queue);
-	atomic_set(&local->n_queued, 0);
 }
 
 static struct mcps802154_access *
@@ -144,13 +134,8 @@ static int mcps802154_default_xmit_skb(struct mcps802154_region *region,
 				       struct sk_buff *skb)
 {
 	struct default_local *local = region_to_local(region);
-	int n_queued;
 
 	skb_queue_tail(&local->queue, skb);
-	n_queued = atomic_inc_return(&local->n_queued);
-	if (n_queued < MCPS802154_DEFAULT_REGION_QUEUE_SIZE)
-		mcps802154_region_xmit_resume(local->llhw, &local->region, 0);
-
 	return 1;
 }
 

@@ -693,16 +693,6 @@ mcps802154_region_event_alloc_skb(struct mcps802154_llhw *llhw,
 int mcps802154_region_event(struct mcps802154_llhw *llhw, struct sk_buff *skb);
 
 /**
- * mcps802154_region_xmit_resume() - Signal buffer transmit can resume.
- * @llhw: Low-level device pointer.
- * @region: Pointer to the open region.
- * @queue_index: Queue index.
- */
-void mcps802154_region_xmit_resume(struct mcps802154_llhw *llhw,
-				   struct mcps802154_region *region,
-				   int queue_index);
-
-/**
  * mcps802154_region_xmit_done() - Signal buffer transmit completion.
  * @llhw: Low-level device pointer.
  * @region: Pointer to the open region.

@@ -22,7 +22,9 @@
  */
 #include <linux/module.h>
 #include <linux/spi/spi.h>
-#include <linux/of_gpio.h>
+#include <linux/gpio/consumer.h>
+#include <linux/of.h>
+#include <linux/irq.h>
 #include <linux/delay.h>
 #include <linux/interrupt.h>
 #include <linux/bitfield.h>
@@ -1865,28 +1867,21 @@ static int dw3000_power_supply(struct dw3000 *dw, int onoff)
  */
 static int dw3000_reset_assert(struct dw3000 *dw, bool reset)
 {
-	int rc;
-
-	if (!gpio_is_valid(dw->reset_gpio)) {
+	if (IS_ERR_OR_NULL(dw->reset_gpio)) {
 		dev_err(dw->dev, "invalid reset gpio\n");
 		return -EINVAL;
 	}
 
 	if (reset) {
 		/* Assert RESET GPIO */
-		rc = gpio_direction_output(dw->reset_gpio, 0);
-		if (rc)
-			dev_err(dw->dev,
-				"Could not set reset gpio as output\n");
+		gpiod_set_value(dw->reset_gpio, 1);
 	} else {
 		/* Release RESET GPIO.
 		 * Reset should be open drain, or switched to input whenever not driven
 		 * low. It should not be driven high. */
-		rc = gpio_direction_input(dw->reset_gpio);
-		if (rc)
-			dev_err(dw->dev, "Could not set reset gpio as input\n");
+		gpiod_set_value(dw->reset_gpio, 0);
 	}
-	return rc;
+	return 0;
 }
 
 /**
@@ -2768,20 +2763,24 @@ void dw3000_setup_regulators(struct dw3000 *dw)
 int dw3000_setup_reset_gpio(struct dw3000 *dw)
 {
 	/* Initialise reset GPIO pin as output */
-	dw->reset_gpio = of_get_named_gpio(dw->dev->of_node, "reset-gpio", 0);
-	if (!gpio_is_valid(dw->reset_gpio)) {
+	dw->reset_gpio = devm_gpiod_get_optional(dw->dev, "reset", GPIOD_OUT_HIGH_OPEN_DRAIN);
+	if (!dw->reset_gpio) {
 		/* Try with old name */
-		dw->reset_gpio = of_get_named_gpio(dw->dev->of_node,
-						   "uwbhal,reset-gpio", 0);
+		dw->reset_gpio = devm_gpiod_get_optional(dw->dev,
+							"uwbhal,reset", GPIOD_OUT_HIGH_OPEN_DRAIN);
 	}
-	if (!gpio_is_valid(dw->reset_gpio)) {
+
+	if (!dw->reset_gpio) {
 		dev_warn(dw->dev, "device does not support GPIO RESET control");
 		return 0;
 	}
-	return devm_gpio_request_one(dw->dev, dw->reset_gpio,
-				     GPIOF_DIR_OUT | GPIOF_OPEN_DRAIN |
-					     GPIOF_INIT_LOW,
-				     "dw3000-reset");
+
+	if (IS_ERR(dw->reset_gpio)) {
+		dev_err(dw->dev, "fail to request reset gpio (%ld)", PTR_ERR(dw->reset_gpio));
+		return PTR_ERR(dw->reset_gpio);
+	}
+
+	return 0;
 }
 
 /**
@@ -2800,21 +2799,18 @@ int dw3000_setup_reset_gpio(struct dw3000 *dw)
 int dw3000_setup_irq(struct dw3000 *dw)
 {
 	int rc;
-	int irq_flags, irq_gpio;
+	int irq_flags;
+	struct gpio_desc *irq_gpio;
 
 	/* Check the presence of irq-gpio in DT. If so,
 	 * use it as irq, if not, "interrupt-parent" or
 	 * "interrupt-extended" should be provided and then used.
 	 */
-	irq_gpio = of_get_named_gpio(dw->dev->of_node, "irq-gpio", 0);
-	if (irq_gpio > 0) {
-		if (!gpio_is_valid(irq_gpio))
-			return -EINVAL;
-
-		devm_gpio_request_one(dw->dev, irq_gpio, GPIOF_IN,
-				      dev_name(dw->dev));
-		dw->spi->irq = gpio_to_irq(irq_gpio);
-	}
+	irq_gpio = devm_gpiod_get_optional(dw->dev, "irq", GPIOD_IN);
+	if (IS_ERR(irq_gpio))
+		return PTR_ERR(irq_gpio);
+	if (irq_gpio)
+		dw->spi->irq = gpiod_to_irq(irq_gpio);
 
 	irq_flags = irq_get_trigger_type(dw->spi->irq);
 	if (!irq_flags) {
@@ -7066,9 +7062,12 @@ int dw3000_transfers_init(struct dw3000 *dw)
 		dw, DW3000_SPI_COLLISION_STATUS_ID, 0, 1, DW3000_SPI_WR_BIT);
 	if (!dw->msg_write_spi_collision_status)
 		goto alloc_err;
-	/* generic read/write full-duplex message */
+	/*
+	 * Generic read/write full-duplex message, with enough space for
+	 * header + 32 bytes data.
+	 */
 	dw->msg_readwrite_fdx =
-		dw3000_alloc_prepare_xfer(dw, 0, 0, 16, DW3000_SPI_RD_BIT);
+		dw3000_alloc_prepare_xfer(dw, 0, 0, 2 + 32, DW3000_SPI_RD_BIT);
 	if (!dw->msg_readwrite_fdx)
 		goto alloc_err;
 	/* mutex protecting msg_readwrite_fdx */

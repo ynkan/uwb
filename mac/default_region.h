@@ -47,11 +47,6 @@ struct default_local {
 	 */
 	struct sk_buff_head queue;
 	/**
-	 * @n_queued: Number of queued frames. This also includes frame being
-	 * transmitted which is no longer in &queue.
-	 */
-	atomic_t n_queued;
-	/**
 	 * @retries: Number of retries done on the current tx frame.
 	 */
 	int retries;
