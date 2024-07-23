@@ -1340,7 +1340,7 @@ TRACE_EVENT(dw3000_nfcc_coex_err,
 	),
 	TP_fast_assign(
 		DW_ASSIGN;
-		__assign_str(err, err);
+		__assign_str(err);
 	),
 	TP_printk(DW_PR_FMT ", err: \"%s\"", DW_PR_ARG, __get_str(err))
 );
@@ -1354,7 +1354,7 @@ TRACE_EVENT(dw3000_nfcc_coex_warn,
 	),
 	TP_fast_assign(
 		DW_ASSIGN;
-		__assign_str(warn, warn);
+		__assign_str(warn);
 	),
 	TP_printk(DW_PR_FMT ", warn: \"%s\"", DW_PR_ARG, __get_str(warn))
 );
