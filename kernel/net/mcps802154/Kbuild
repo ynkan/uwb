@@ -65,7 +65,7 @@ mcps802154_region_pctt-y := \
 	pctt_session.o \
 	pctt_trace.o
 
-CFLAGS_trace.o := -I$(src) -I$(srctree)/$(src)
-CFLAGS_fira_trace.o := -I$(src) -I$(srctree)/$(src)
-CFLAGS_pctt_trace.o := -I$(src) -I$(srctree)/$(src)
-CFLAGS_nfcc_coex_trace.o := -I$(src) -I$(srctree)/$(src)
+CFLAGS_trace.o := -I$(src)
+CFLAGS_fira_trace.o := -I$(src)
+CFLAGS_pctt_trace.o := -I$(src)
+CFLAGS_nfcc_coex_trace.o := -I$(src)

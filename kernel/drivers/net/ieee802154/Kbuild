@@ -25,7 +25,7 @@ dw3000-$(CONFIG_MCPS802154_TESTMODE) += dw3000_testmode.o
 
 dw3000-core-tests-$(CONFIG_KUNIT) += dw3000_core_tests.o
 
-CFLAGS_dw3000_trc.o := -I$(src) -I$(srctree)/$(src)
+CFLAGS_dw3000_trc.o := -I$(src)
 ifneq ($(GITVERSION),)
 CFLAGS_dw3000_spi.o := -DGITVERSION='"$(GITVERSION)"'
 endif
