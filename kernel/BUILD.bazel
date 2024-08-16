@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: GPL-2.0-or-later
 
-load("//build/kernel/kleaf:kernel.bzl", "kernel_module")
+load("//build/kernel/kleaf:kernel.bzl", "ddk_headers", "ddk_module", "kernel_module")
 
 kernel_module(
     name = "uwb.dw3000",
@@ -11,7 +11,6 @@ kernel_module(
     ]),
     outs = [
         "drivers/net/ieee802154/dw3000.ko",
-        "drivers/net/ieee802154/dw3000-core-tests.ko",
         "net/mcps802154/mcps802154.ko",
         "net/mcps802154/mcps802154_region_fira.ko",
         "net/mcps802154/mcps802154_region_nfcc_coex.ko",
@@ -20,5 +19,34 @@ kernel_module(
     kernel_build = "//private/google-modules/soc/gs:gs_kernel_build",
     visibility = [
         "//private/google-modules/soc/gs:__pkg__",
+    ],
+)
+
+ddk_headers(
+    name = "dw3000_headers",
+    hdrs = glob(["drivers/net/ieee802154/*.h"]),
+    includes = ["drivers/net/ieee802154"],
+)
+
+ddk_module(
+    name = "dw3000-core-tests",
+    srcs = [
+        "drivers/net/ieee802154/dw3000_core_tests.c",
+    ],
+    out = "dw3000-core-tests.ko",
+    hdrs = [
+        "drivers/net/ieee802154/dw3000.h",
+        "drivers/net/ieee802154/dw3000_core.h",
+        "drivers/net/ieee802154/dw3000_power_stats.h",
+    ],
+    kernel_build = "//private/google-modules/soc/gs:gs_kernel_build",
+    visibility = [
+        "//private/devices/google:__subpackages__",
+    ],
+    deps = [
+        ":dw3000_headers",
+        ":uwb.dw3000",
+        "//common:all_headers_aarch64",
+        "//private/google-modules/uwb/mac:dw3000_mac_headers",
     ],
 )

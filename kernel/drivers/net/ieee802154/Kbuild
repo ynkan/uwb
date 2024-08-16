@@ -34,7 +34,9 @@ ifdef CONFIG_SPI_MASTER
 # Build dw3000.ko only if SPI supported on target kernel.
 obj-m += dw3000.o
 endif
+ifdef CONFIG_DW3000_DEBUG
 ifdef CONFIG_KUNIT
 # Build test suites if kunit enabled in target kernel config.
 obj-m += dw3000-core-tests.o
+endif
 endif

@@ -1,0 +1,14 @@
+# SPDX-License-Identifier: GPL-2.0-or-later
+
+load("//build/kernel/kleaf:kernel.bzl", "ddk_headers")
+
+ddk_headers(
+    name = "dw3000_mac_headers",
+    hdrs = glob([
+        "include/*/*.h",
+    ]),
+    includes = ["include"],
+    visibility = [
+        "//private/google-modules/uwb/qorvo/dw3000:__subpackages__",
+    ],
+)
