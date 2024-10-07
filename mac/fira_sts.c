@@ -27,9 +27,9 @@
 #include "fira_sts.h"
 #include "fira_crypto.h"
 
-#include <asm/unaligned.h>
 #include <linux/errno.h>
 #include <linux/string.h>
+#include <linux/unaligned.h>
 
 #define FIRA_CONCATENATED_PARAMS_SIZE 17
 

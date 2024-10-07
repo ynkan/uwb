@@ -28,7 +28,6 @@
 #include "fira_trace.h"
 #include "fira_sts.h"
 
-#include <asm/unaligned.h>
 #include <linux/string.h>
 #include <linux/ieee802154.h>
 #include <linux/math64.h>

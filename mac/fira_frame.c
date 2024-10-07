@@ -26,11 +26,11 @@
 #include "fira_crypto.h"
 #include "fira_trace.h"
 
-#include <asm/unaligned.h>
 #include <linux/bitfield.h>
 #include <linux/errno.h>
 #include <linux/ieee802154.h>
 #include <linux/math64.h>
+#include <linux/unaligned.h>
 #include <net/af_ieee802154.h>
 #include <net/mcps802154_frame.h>
 

@@ -31,9 +31,8 @@
 #include <linux/list.h>
 #include <linux/module.h>
 #include <linux/mutex.h>
+#include <linux/unaligned.h>
 #include <crypto/aes.h>
-
-#include <asm/unaligned.h>
 
 #include "fira_crypto.h"
 #include <net/mcps802154_frame.h>
